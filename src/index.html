@@ -1,13 +1,40 @@
+<!-- src/index.html -->
+
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>FlashcardsApp</title>
-  <base href="/">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <head>
+    <meta charset="utf-8"/>
+    <title>Flashcards</title>
+    <base href="/"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+    <meta name="description" content="Simple flashcards app with difficulty levels 1–10."/>
+    <link rel="icon" type="image/x-icon" href="favicon.ico"/>
+    <style>
+      /* Ensure a dark background while Angular is bootstrapping */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #050608;
+        color: #e6edf3;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+          sans-serif;
+      }
+
+      body {
+        display: flex;
+      }
+
+      app-root {
+        flex: 1;
+        display: block;
+      }
+    </style>
+    <link rel="manifest" href="manifest.webmanifest">
 </head>
-<body>
-  <app-root></app-root>
+  <body>
+    <app-root></app-root>
+    <noscript>Please enable JavaScript to continue using this application.</noscript>
 </body>
 </html>
