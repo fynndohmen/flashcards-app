@@ -1,0 +1,79 @@
+{
+  "configVersion": 1,
+  "timestamp": 1763634079471,
+  "index": "/flashcards-app/index.html",
+  "assetGroups": [
+    {
+      "name": "app",
+      "installMode": "prefetch",
+      "updateMode": "prefetch",
+      "cacheQueryOptions": {
+        "ignoreVary": true
+      },
+      "urls": [
+        "/flashcards-app/favicon.ico",
+        "/flashcards-app/index.html",
+        "/flashcards-app/main-R5OSGGSA.js",
+        "/flashcards-app/manifest.webmanifest",
+        "/flashcards-app/polyfills-5CFQRCPP.js",
+        "/flashcards-app/styles-C24EESIE.css"
+      ],
+      "patterns": []
+    },
+    {
+      "name": "assets",
+      "installMode": "lazy",
+      "updateMode": "prefetch",
+      "cacheQueryOptions": {
+        "ignoreVary": true
+      },
+      "urls": [
+        "/flashcards-app/icons/icon-128x128.png",
+        "/flashcards-app/icons/icon-144x144.png",
+        "/flashcards-app/icons/icon-152x152.png",
+        "/flashcards-app/icons/icon-192x192.png",
+        "/flashcards-app/icons/icon-384x384.png",
+        "/flashcards-app/icons/icon-512x512.png",
+        "/flashcards-app/icons/icon-72x72.png",
+        "/flashcards-app/icons/icon-96x96.png"
+      ],
+      "patterns": []
+    }
+  ],
+  "dataGroups": [],
+  "hashTable": {
+    "/flashcards-app/favicon.ico": "9c39f434fe1261f68c5e3eefdf734630d99c5670",
+    "/flashcards-app/icons/icon-128x128.png": "f912963bdc6d5a38d8f1dd0afbaab2ce8d657acb",
+    "/flashcards-app/icons/icon-144x144.png": "b155fd5f2fd5d2ea7760721063003c4cd95fd783",
+    "/flashcards-app/icons/icon-152x152.png": "eae6e0f0c8afb8aaae339e2a569b43e9238e5e6c",
+    "/flashcards-app/icons/icon-192x192.png": "15c4180454633880d98674aa7394656196c91584",
+    "/flashcards-app/icons/icon-384x384.png": "94a915751ef6c9282df9aea405ad679230631814",
+    "/flashcards-app/icons/icon-512x512.png": "1de182f76f7329dfa8f9fcdd1fdcdd695bea6a99",
+    "/flashcards-app/icons/icon-72x72.png": "aa88a6096bd973be7f6d7a5489bfa6bc2463f8c4",
+    "/flashcards-app/icons/icon-96x96.png": "7fb8f59c30ce2ff12c700321a0b39e14b3dc8f95",
+    "/flashcards-app/index.html": "a200a18656ad0ed9bffe673d46c9516105b52db6",
+    "/flashcards-app/main-R5OSGGSA.js": "36429d83119aa725ab153c6bd4acb9ccb9331966",
+    "/flashcards-app/manifest.webmanifest": "6ec184ea2191730d55303eba6a3bf377b014237f",
+    "/flashcards-app/polyfills-5CFQRCPP.js": "f2241e9a25858f895ce299d15f6f22e849e2fd72",
+    "/flashcards-app/styles-C24EESIE.css": "b2daf9d9482cd5216266bdf8b0ffd0a7de5d4050"
+  },
+  "navigationUrls": [
+    {
+      "positive": true,
+      "regex": "^\\/.*$"
+    },
+    {
+      "positive": false,
+      "regex": "^\\/(?:.+\\/)?[^/]*\\.[^/]*$"
+    },
+    {
+      "positive": false,
+      "regex": "^\\/(?:.+\\/)?[^/]*__[^/]*$"
+    },
+    {
+      "positive": false,
+      "regex": "^\\/(?:.+\\/)?[^/]*__[^/]*\\/.*$"
+    }
+  ],
+  "navigationRequestStrategy": "performance"
+}
