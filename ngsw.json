@@ -1,6 +1,6 @@
 {
   "configVersion": 1,
-  "timestamp": 1763636321823,
+  "timestamp": 1763637971948,
   "index": "/flashcards-app/index.html",
   "assetGroups": [
     {
@@ -13,7 +13,7 @@
       "urls": [
         "/flashcards-app/favicon.ico",
         "/flashcards-app/index.html",
-        "/flashcards-app/main-ORKQWGTA.js",
+        "/flashcards-app/main-VIIGTOJA.js",
         "/flashcards-app/manifest.webmanifest",
         "/flashcards-app/polyfills-5CFQRCPP.js",
         "/flashcards-app/styles-C24EESIE.css"
@@ -51,8 +51,8 @@
     "/flashcards-app/icons/icon-512x512.png": "1de182f76f7329dfa8f9fcdd1fdcdd695bea6a99",
     "/flashcards-app/icons/icon-72x72.png": "aa88a6096bd973be7f6d7a5489bfa6bc2463f8c4",
     "/flashcards-app/icons/icon-96x96.png": "7fb8f59c30ce2ff12c700321a0b39e14b3dc8f95",
-    "/flashcards-app/index.html": "305fa682f1ba76f1b19afaa7e68640dfb18a56f2",
-    "/flashcards-app/main-ORKQWGTA.js": "3c9865f298b0b3bbffc9afdc68a354391f49a5a7",
+    "/flashcards-app/index.html": "da4681e22243a9b17e48472169247d233978de04",
+    "/flashcards-app/main-VIIGTOJA.js": "c92783c33ced9dea0e454fda419471cb4678cf57",
     "/flashcards-app/manifest.webmanifest": "6ec184ea2191730d55303eba6a3bf377b014237f",
     "/flashcards-app/polyfills-5CFQRCPP.js": "f2241e9a25858f895ce299d15f6f22e849e2fd72",
     "/flashcards-app/styles-C24EESIE.css": "b2daf9d9482cd5216266bdf8b0ffd0a7de5d4050"
