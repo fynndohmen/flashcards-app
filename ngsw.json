@@ -1,6 +1,6 @@
 {
   "configVersion": 1,
-  "timestamp": 1763796394455,
+  "timestamp": 1763796913644,
   "index": "/flashcards-app/index.html",
   "assetGroups": [
     {
@@ -13,7 +13,7 @@
       "urls": [
         "/flashcards-app/favicon.ico",
         "/flashcards-app/index.html",
-        "/flashcards-app/main-GJIJU3VK.js",
+        "/flashcards-app/main-WLYE5OLL.js",
         "/flashcards-app/manifest.webmanifest",
         "/flashcards-app/polyfills-5CFQRCPP.js",
         "/flashcards-app/styles-C24EESIE.css"
@@ -51,8 +51,8 @@
     "/flashcards-app/icons/icon-512x512.png": "1de182f76f7329dfa8f9fcdd1fdcdd695bea6a99",
     "/flashcards-app/icons/icon-72x72.png": "aa88a6096bd973be7f6d7a5489bfa6bc2463f8c4",
     "/flashcards-app/icons/icon-96x96.png": "7fb8f59c30ce2ff12c700321a0b39e14b3dc8f95",
-    "/flashcards-app/index.html": "7e9aafabb52703dce4aecb9984ae5bbdc39ffb33",
-    "/flashcards-app/main-GJIJU3VK.js": "3bf2321c6bc96a5f4e4090f0b051799d9c0d681f",
+    "/flashcards-app/index.html": "3c2b0ba5037131d018dfbbf076c9b5a680887bef",
+    "/flashcards-app/main-WLYE5OLL.js": "f8d7ff2807ce1e9aadc9135329df84f745baefc0",
     "/flashcards-app/manifest.webmanifest": "6ec184ea2191730d55303eba6a3bf377b014237f",
     "/flashcards-app/polyfills-5CFQRCPP.js": "f2241e9a25858f895ce299d15f6f22e849e2fd72",
     "/flashcards-app/styles-C24EESIE.css": "b2daf9d9482cd5216266bdf8b0ffd0a7de5d4050"
