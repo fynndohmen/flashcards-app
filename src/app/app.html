@@ -13,6 +13,38 @@
     <section *ngIf="!selectedDeck" class="deck-list-view">
       <h2>Decks</h2>
 
+      <!-- Backup / restore controls -->
+      <div class="deck-create">
+        <h3>Backup &amp; restore (this device)</h3>
+        <p class="hint">
+          Export all decks and cards as a backup file, or import a backup from
+          another device.
+        </p>
+
+        <div class="deck-menu-actions">
+          <button type="button" (click)="exportData()">
+            Export data
+          </button>
+
+          <!-- Hidden file input for importing backups -->
+          <input
+            #importFileInput
+            type="file"
+            accept="application/json"
+            (change)="importDataFromFile($event)"
+            style="display: none"
+          />
+
+          <button
+            type="button"
+            class="secondary"
+            (click)="importFileInput.click()"
+          >
+            Import data
+          </button>
+        </div>
+      </div>
+
       <div class="deck-create">
         <h3>Create new deck</h3>
         <form (ngSubmit)="createDeck()" #deckForm="ngForm" class="deck-form">
@@ -145,21 +177,43 @@
                 </label>
 
                 <label>
-                  Image
+                  Images
                   <input
                     type="file"
                     accept="image/*"
                     (change)="onFrontImageSelected($event)"
                   />
+                  <span class="hint">Choose one image at a time to add multiple screenshots.</span>
                 </label>
 
-                <div class="image-preview" *ngIf="cardForm.frontImageDataUrl">
-                  <img
-                    [src]="cardForm.frontImageDataUrl"
-                    alt="Front side image"
-                  />
-                  <button type="button" (click)="clearFrontImage()">
-                    Remove image
+                <div
+                  class="image-preview"
+                  *ngIf="cardForm.frontImageDataUrls.length > 0"
+                >
+                  <div class="image-preview-grid">
+                    <div
+                      class="image-preview-item"
+                      *ngFor="let img of cardForm.frontImageDataUrls; let i = index"
+                    >
+                      <img
+                        [src]="img"
+                        [alt]="'Front side image ' + (i + 1)"
+                      />
+                      <button
+                        type="button"
+                        class="secondary"
+                        (click)="removeFrontImage(i)"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    class="secondary"
+                    (click)="clearFrontImages()"
+                  >
+                    Remove all images
                   </button>
                 </div>
               </div>
@@ -178,21 +232,43 @@
                 </label>
 
                 <label>
-                  Image
+                  Images
                   <input
                     type="file"
                     accept="image/*"
                     (change)="onBackImageSelected($event)"
                   />
+                  <span class="hint">Choose one image at a time to add multiple screenshots.</span>
                 </label>
 
-                <div class="image-preview" *ngIf="cardForm.backImageDataUrl">
-                  <img
-                    [src]="cardForm.backImageDataUrl"
-                    alt="Back side image"
-                  />
-                  <button type="button" (click)="clearBackImage()">
-                    Remove image
+                <div
+                  class="image-preview"
+                  *ngIf="cardForm.backImageDataUrls.length > 0"
+                >
+                  <div class="image-preview-grid">
+                    <div
+                      class="image-preview-item"
+                      *ngFor="let img of cardForm.backImageDataUrls; let i = index"
+                    >
+                      <img
+                        [src]="img"
+                        [alt]="'Back side image ' + (i + 1)"
+                      />
+                      <button
+                        type="button"
+                        class="secondary"
+                        (click)="removeBackImage(i)"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    class="secondary"
+                    (click)="clearBackImages()"
+                  >
+                    Remove all images
                   </button>
                 </div>
               </div>
@@ -239,8 +315,20 @@
                       <div class="card-text" *ngIf="card.front.text">
                         {{ card.front.text }}
                       </div>
-                      <div class="card-image-thumb" *ngIf="card.front.imageDataUrl">
-                        <img [src]="card.front.imageDataUrl" alt="Front side image" />
+                      <div
+                        class="card-image-thumb"
+                        *ngIf="card.front.imageDataUrls?.length"
+                      >
+                        <img
+                          [src]="card.front.imageDataUrls[0]"
+                          alt="Front side image"
+                        />
+                        <span
+                          class="thumb-counter"
+                          *ngIf="card.front.imageDataUrls.length > 1"
+                        >
+                          +{{ card.front.imageDataUrls.length - 1 }}
+                        </span>
                       </div>
                     </div>
                   </td>
@@ -249,8 +337,20 @@
                       <div class="card-text" *ngIf="card.back.text">
                         {{ card.back.text }}
                       </div>
-                      <div class="card-image-thumb" *ngIf="card.back.imageDataUrl">
-                        <img [src]="card.back.imageDataUrl" alt="Back side image" />
+                      <div
+                        class="card-image-thumb"
+                        *ngIf="card.back.imageDataUrls?.length"
+                      >
+                        <img
+                          [src]="card.back.imageDataUrls[0]"
+                          alt="Back side image"
+                        />
+                        <span
+                          class="thumb-counter"
+                          *ngIf="card.back.imageDataUrls.length > 1"
+                        >
+                          +{{ card.back.imageDataUrls.length - 1 }}
+                        </span>
                       </div>
                     </div>
                   </td>
@@ -292,10 +392,55 @@
           Create some cards first before starting a practice session.
         </p>
 
+        <!-- Difficulty filter bar -->
+        <div *ngIf="deck.cards.length > 0" class="practice-filter">
+          <p class="practice-filter-label">Difficulty filter</p>
+          <div class="difficulty-bar">
+            <!-- All -->
+            <button
+              type="button"
+              class="difficulty-chip difficulty-all"
+              [class.active]="practiceDifficultyFilter === 'all'"
+              (click)="practiceDifficultyFilter = 'all'"
+            >
+              <div class="chip-label">All</div>
+              <div class="chip-count">{{ getTotalCount(deck) }}</div>
+            </button>
+
+            <!-- Unsorted / unrated -->
+            <button
+              type="button"
+              class="difficulty-chip difficulty-unrated"
+              [class.active]="practiceDifficultyFilter === 'unrated'"
+              (click)="practiceDifficultyFilter = 'unrated'"
+            >
+              <div class="chip-label">Unsorted</div>
+              <div class="chip-count">{{ getUnratedCount(deck) }}</div>
+            </button>
+
+            <!-- Levels 1–10 -->
+            <button
+              *ngFor="let level of [1,2,3,4,5,6,7,8,9,10]"
+              type="button"
+              class="difficulty-chip"
+              [ngClass]="'difficulty-' + level"
+              [class.active]="practiceDifficultyFilter === level"
+              (click)="practiceDifficultyFilter = level"
+            >
+              <div class="chip-label">{{ level }}</div>
+              <div class="chip-count">{{ getDifficultyCount(deck, level) }}</div>
+            </button>
+          </div>
+
+          <p class="hint practice-filter-hint">
+            Only cards with the selected difficulty will be included in this session.
+          </p>
+        </div>
+
         <div *ngIf="deck.cards.length > 0">
           <div *ngIf="!isPracticeMode">
             <button type="button" (click)="startPractice()">
-              Start practice ({{ deck.cards.length }} card(s))
+              Start practice ({{ deck.cards.length }} card(s) in deck)
             </button>
           </div>
 
@@ -317,11 +462,28 @@
                 }}
               </p>
 
-              <div class="practice-image" *ngIf="!showBackSide && card.front.imageDataUrl">
-                <img [src]="card.front.imageDataUrl" alt="Front side image" />
+              <!-- Multiple images, large, filling the card area -->
+              <div
+                class="practice-images"
+                *ngIf="!showBackSide && card.front.imageDataUrls?.length"
+              >
+                <img
+                  *ngFor="let img of card.front.imageDataUrls"
+                  class="practice-image"
+                  [src]="img"
+                  alt="Front side image"
+                />
               </div>
-              <div class="practice-image" *ngIf="showBackSide && card.back.imageDataUrl">
-                <img [src]="card.back.imageDataUrl" alt="Back side image" />
+              <div
+                class="practice-images"
+                *ngIf="showBackSide && card.back.imageDataUrls?.length"
+              >
+                <img
+                  *ngFor="let img of card.back.imageDataUrls"
+                  class="practice-image"
+                  [src]="img"
+                  alt="Back side image"
+                />
               </div>
 
               <div class="practice-actions">

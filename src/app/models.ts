@@ -1,6 +1,6 @@
 // src/app/models.ts
 
-// Schwierigkeit 1–10 als eigener Typ
+// Difficulty 1–10 as its own type
 export type DifficultyLevel =
   | 1
   | 2
@@ -13,66 +13,71 @@ export type DifficultyLevel =
   | 9
   | 10;
 
-// Hilfsarray für Schleifen im UI (Buttons 1–10 etc.)
+// Helper array for loops in the UI (buttons 1–10 etc.)
 export const ALL_DIFFICULTY_LEVELS: DifficultyLevel[] = [
   1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
 ];
 
-// Inhalt einer Kartenseite (Vorder- oder Rückseite)
+/**
+ * Content of a single card side (front or back).
+ *
+ * - text: text on this side
+ * - imageDataUrls: zero or more images, stored as data URLs
+ */
 export interface CardSideContent {
-  /** Text auf dieser Seite der Karte. */
+  /** Text on this side of the card. */
   text: string;
 
   /**
-   * Optionales Bild auf dieser Seite der Karte.
-   * Wir speichern das als Data-URL (z.B. "data:image/png;base64,..."),
-   * damit alles lokal in localStorage gesichert werden kann.
+   * Optional images on this side of the card.
+   * We store them as Data-URLs (e.g. "data:image/png;base64,..."),
+   * so everything can be saved locally (localStorage / export).
    */
-  imageDataUrl?: string;
+  imageDataUrls: string[];
 }
 
-// Eine einzelne Karteikarte
+// A single flashcard
 export interface Flashcard {
-  /** Eindeutige ID der Karte. */
+  /** Unique ID of the card. */
   id: string;
 
-  /** Vorderseite der Karte (mit Text + optionalem Bild). */
+  /** Front side of the card (text + images). */
   front: CardSideContent;
 
-  /** Rückseite der Karte (mit Text + optionalem Bild). */
+  /** Back side of the card (text + images). */
   back: CardSideContent;
 
   /**
-   * Schwierigkeit 1 (sehr leicht) bis 10 (sehr schwer).
-   * Nach jedem Anschauen ordnen wir die Karte in einen dieser "Unterstapel" ein.
+   * Difficulty 1 (very easy) to 10 (very hard).
+   * After each review we assign the card to one of these "sub-stacks".
    */
   difficulty: DifficultyLevel;
 
-  /** Erstellzeitpunkt als ISO-String, z.B. new Date().toISOString(). */
+  /** Creation timestamp as ISO string, e.g. new Date().toISOString(). */
   createdAt: string;
 
-  /** Optional: letzter Änderungszeitpunkt. */
+  /** Optional: last modification timestamp. */
   updatedAt?: string;
 }
 
-// Ein Stapel (Deck) von Karteikarten
+// A deck (stack) of flashcards
 export interface Deck {
-  /** Eindeutige ID des Stapels. */
+  /** Unique ID of the deck. */
   id: string;
 
-  /** Name des Stapels, z.B. "Spanisch – Verben". */
+  /** Name of the deck, e.g. "Spanish – Verbs". */
   name: string;
 
-  /** Optionale Beschreibung für die Übersicht. */
+  /** Optional description shown in the overview. */
   description?: string;
 
-  /** Alle Karten dieses Stapels. */
+  /** All cards in this deck. */
   cards: Flashcard[];
 }
 
 /**
- * Gesamter Zustand der App.
- * Diese Struktur legen wir später 1:1 in localStorage ab.
+ * Global app state.
+ * We store this structure 1:1 in localStorage / export backups.
  */
 export interface FlashcardsState {
   decks: Deck[];

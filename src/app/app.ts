@@ -8,10 +8,13 @@ import {
   Deck,
   DifficultyLevel,
   Flashcard,
+  FlashcardsState,
 } from './models';
 import { FlashcardsStateService } from './flashcards-state.service';
 
 type DeckViewMode = 'menu' | 'edit' | 'practice' | null;
+// allow number so template assignments like "practiceDifficultyFilter = level" are valid
+type PracticeDifficultyFilter = 'all' | 'unrated' | number;
 
 @Component({
   selector: 'app-root',
@@ -23,6 +26,9 @@ type DeckViewMode = 'menu' | 'edit' | 'practice' | null;
 export class AppComponent {
   // App title (not heavily used, but we keep it)
   title = 'flashcards-app';
+
+  // App is loaded from IndexedDB asynchronously
+  isAppReady = false;
 
   // -----------------------------
   // Overall state for the UI
@@ -39,9 +45,9 @@ export class AppComponent {
   cardForm = {
     editingCardId: null as string | null,
     frontText: '',
-    frontImageDataUrl: '' as string | null,
+    frontImageDataUrls: [] as string[],
     backText: '',
-    backImageDataUrl: '' as string | null,
+    backImageDataUrls: [] as string[],
   };
 
   // Practice mode
@@ -51,8 +57,23 @@ export class AppComponent {
   practiceIndex = 0;
   practiceFinished = false;
 
+  // Practice difficulty filter: 'all', 'unrated', or a specific level 1–10
+  practiceDifficultyFilter: PracticeDifficultyFilter = 'all';
+
   constructor(private state: FlashcardsStateService) {
-    this.reloadDecks();
+    void this.initializeApp();
+  }
+
+  private async initializeApp(): Promise<void> {
+    try {
+      await this.state.whenReady();
+      this.reloadDecks();
+      this.isAppReady = true;
+    } catch (err) {
+      console.error('Failed to initialize app', err);
+      alert('The app could not load saved data. Please check the console for details.');
+      this.isAppReady = true;
+    }
   }
 
   // Currently selected deck
@@ -142,6 +163,81 @@ export class AppComponent {
   }
 
   // -----------------------------
+  // Export / Import
+  // -----------------------------
+
+  /** Download current state as JSON file. */
+  exportData(): void {
+    try {
+      const state = this.state.exportState();
+      const json = JSON.stringify(state, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      a.href = url;
+      a.download = `flashcards-backup-${timestamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Export failed', err);
+      alert('Export failed. Please check the console for details.');
+    }
+  }
+
+  /**
+   * Handle selection of a JSON file and import its contents.
+   * Bound to a hidden <input type="file"> in the template.
+   */
+  importDataFromFile(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    if (!input.files || input.files.length === 0) {
+      return;
+    }
+    const file = input.files[0];
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const text = reader.result;
+        if (typeof text !== 'string') {
+          throw new Error('Unexpected file content');
+        }
+
+        const parsed = JSON.parse(text) as FlashcardsState;
+
+        const ok = confirm(
+          'Importing this backup will replace all decks and cards on this device. Continue?'
+        );
+        if (!ok) {
+          return;
+        }
+
+        // Important: wait until IndexedDB has actually saved the imported state.
+        await this.state.importState(parsed);
+
+        this.reloadDecks();
+        this.selectedDeckId = null;
+        this.deckViewMode = null;
+        this.exitPracticeMode();
+        this.resetCardForm();
+
+        alert('Import successful.');
+      } catch (err) {
+        console.error('Import failed', err);
+        alert('Import failed. Please make sure you selected a valid backup file.');
+      }
+    };
+
+    reader.readAsText(file);
+
+    // Allow selecting the same file again later
+    input.value = '';
+  }
+
+  // -----------------------------
   // Card management
   // -----------------------------
 
@@ -152,9 +248,9 @@ export class AppComponent {
   startEditCard(card: Flashcard): void {
     this.cardForm.editingCardId = card.id;
     this.cardForm.frontText = card.front.text;
-    this.cardForm.frontImageDataUrl = card.front.imageDataUrl || null;
+    this.cardForm.frontImageDataUrls = [...(card.front.imageDataUrls || [])];
     this.cardForm.backText = card.back.text;
-    this.cardForm.backImageDataUrl = card.back.imageDataUrl || null;
+    this.cardForm.backImageDataUrls = [...(card.back.imageDataUrls || [])];
   }
 
   saveCard(): void {
@@ -163,16 +259,21 @@ export class AppComponent {
 
     const front: CardSideContent = {
       text: (this.cardForm.frontText || '').trim(),
-      imageDataUrl: this.cardForm.frontImageDataUrl || undefined,
+      imageDataUrls: [...this.cardForm.frontImageDataUrls],
     };
 
     const back: CardSideContent = {
       text: (this.cardForm.backText || '').trim(),
-      imageDataUrl: this.cardForm.backImageDataUrl || undefined,
+      imageDataUrls: [...this.cardForm.backImageDataUrls],
     };
 
     // Ignore completely empty cards (no text, no images)
-    if (!front.text && !front.imageDataUrl && !back.text && !back.imageDataUrl) {
+    if (
+      !front.text &&
+      front.imageDataUrls.length === 0 &&
+      !back.text &&
+      back.imageDataUrls.length === 0
+    ) {
       return;
     }
 
@@ -206,9 +307,9 @@ export class AppComponent {
     this.cardForm = {
       editingCardId: null,
       frontText: '',
-      frontImageDataUrl: null,
+      frontImageDataUrls: [],
       backText: '',
-      backImageDataUrl: null,
+      backImageDataUrls: [],
     };
   }
 
@@ -218,24 +319,46 @@ export class AppComponent {
 
   onFrontImageSelected(event: Event): void {
     this.loadImageFromEvent(event, (dataUrl) => {
-      this.cardForm.frontImageDataUrl = dataUrl;
+      this.cardForm.frontImageDataUrls = [
+        ...this.cardForm.frontImageDataUrls,
+        dataUrl,
+      ];
     });
   }
 
-  clearFrontImage(): void {
-    this.cardForm.frontImageDataUrl = null;
+  clearFrontImages(): void {
+    this.cardForm.frontImageDataUrls = [];
+  }
+
+  removeFrontImage(index: number): void {
+    this.cardForm.frontImageDataUrls = this.cardForm.frontImageDataUrls.filter(
+      (_img, i) => i !== index
+    );
   }
 
   onBackImageSelected(event: Event): void {
     this.loadImageFromEvent(event, (dataUrl) => {
-      this.cardForm.backImageDataUrl = dataUrl;
+      this.cardForm.backImageDataUrls = [
+        ...this.cardForm.backImageDataUrls,
+        dataUrl,
+      ];
     });
   }
 
-  clearBackImage(): void {
-    this.cardForm.backImageDataUrl = null;
+  clearBackImages(): void {
+    this.cardForm.backImageDataUrls = [];
   }
 
+  removeBackImage(index: number): void {
+    this.cardForm.backImageDataUrls = this.cardForm.backImageDataUrls.filter(
+      (_img, i) => i !== index
+    );
+  }
+
+  /**
+   * Reads a single image file from a file input and returns the Data URL.
+   * Choose images multiple times to add multiple screenshots.
+   */
   private loadImageFromEvent(
     event: Event,
     onLoaded: (dataUrl: string) => void
@@ -253,6 +376,9 @@ export class AppComponent {
       }
     };
     reader.readAsDataURL(file);
+
+    // Allow selecting the same file again later
+    input.value = '';
   }
 
   // -----------------------------
@@ -265,7 +391,26 @@ export class AppComponent {
       return;
     }
 
-    this.practiceCards = this.shuffle([...deck.cards]);
+    // Build pool based on selected difficulty filter
+    let pool: Flashcard[] = deck.cards;
+
+    if (this.practiceDifficultyFilter === 'unrated') {
+      // "Unsorted": cards that were never updated after creation.
+      pool = deck.cards.filter((card) => {
+        const updated = card.updatedAt ?? card.createdAt;
+        return updated === card.createdAt;
+      });
+    } else if (this.practiceDifficultyFilter !== 'all') {
+      const target = this.practiceDifficultyFilter as DifficultyLevel;
+      pool = deck.cards.filter((card) => card.difficulty === target);
+    }
+
+    if (pool.length === 0) {
+      alert('No cards match the selected difficulty filter.');
+      return;
+    }
+
+    this.practiceCards = this.shuffle([...pool]);
     this.practiceIndex = 0;
     this.practiceFinished = false;
     this.isPracticeMode = true;
@@ -285,17 +430,24 @@ export class AppComponent {
     this.showBackSide = !this.showBackSide;
   }
 
-  rateCurrentCard(level: number): void {
+  async rateCurrentCard(level: number): Promise<void> {
     const deck = this.selectedDeck;
     const card = this.currentPracticeCard;
     if (!deck || !card) return;
     if (level < 1 || level > 10) return;
 
     const difficulty = level as DifficultyLevel;
-    this.state.setCardDifficulty(deck.id, card.id, difficulty);
 
-    this.nextPracticeCard();
-    this.reloadDecks();
+    try {
+      // Important: wait until IndexedDB has actually saved the difficulty.
+      await this.state.setCardDifficulty(deck.id, card.id, difficulty);
+
+      this.nextPracticeCard();
+      this.reloadDecks();
+    } catch (err) {
+      console.error('Failed to save difficulty', err);
+      alert('Could not save the difficulty rating. Please try again.');
+    }
   }
 
   private nextPracticeCard(): void {
@@ -306,6 +458,28 @@ export class AppComponent {
     }
     this.practiceIndex += 1;
     this.showBackSide = false;
+  }
+
+  // -----------------------------
+  // Counts for difficulty chips
+  // -----------------------------
+
+  /** Total cards in the given deck. */
+  getTotalCount(deck: Deck): number {
+    return deck.cards.length;
+  }
+
+  /** Cards that are "unsorted/unrated" (never updated after creation). */
+  getUnratedCount(deck: Deck): number {
+    return deck.cards.filter((card) => {
+      const updated = card.updatedAt ?? card.createdAt;
+      return updated === card.createdAt;
+    }).length;
+  }
+
+  /** Cards with a specific difficulty level. */
+  getDifficultyCount(deck: Deck, level: number): number {
+    return deck.cards.filter((card) => card.difficulty === level).length;
   }
 
   // -----------------------------

@@ -127,7 +127,11 @@ button {
   cursor: pointer;
   background: #238636;
   color: #ffffff;
-  transition: background 0.15s ease, transform 0.05s ease, box-shadow 0.15s ease;
+  transition:
+    background 0.15s ease,
+    transform 0.05s ease,
+    box-shadow 0.15s ease,
+    opacity 0.15s ease;
 }
 
 button:hover {
@@ -286,6 +290,8 @@ button:disabled {
   margin-top: 0.25rem;
 }
 
+/* Image preview grid in edit mode */
+
 .image-preview {
   margin-top: 0.35rem;
   display: flex;
@@ -293,11 +299,24 @@ button:disabled {
   gap: 0.4rem;
 }
 
-.image-preview img {
+.image-preview-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.image-preview-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-width: 200px;
+}
+
+.image-preview-item img {
   max-width: 100%;
-  max-height: 180px;
+  max-height: 160px;
   border-radius: 0.5rem;
-  object-fit: contain;
+  object-fit: cover;
   border: 1px solid #30363d;
 }
 
@@ -311,11 +330,6 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-}
-
-.practice-progress {
-  font-size: 0.85rem;
-  color: #8b949e;
 }
 
 .practice-card {
@@ -341,6 +355,7 @@ button:disabled {
   color: #c9d1d9;
 }
 
+/* Alte Regel (wir lassen sie stehen, schadet nicht) */
 .practice-image img {
   max-width: 100%;
   max-height: 220px;
@@ -348,6 +363,25 @@ button:disabled {
   object-fit: contain;
   border: 1px solid #30363d;
 }
+
+/* NEU: Bilder im Practice-Mode sollen im Container bleiben und groß sein */
+.practice-images {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
+.practice-image {
+  max-width: 100%;
+  max-height: min(70vh, 900px);
+  border-radius: 0.75rem;
+  object-fit: contain;
+  border: 1px solid #30363d;
+}
+
+/* Actions & rating */
 
 .practice-actions {
   display: flex;
@@ -379,6 +413,136 @@ button:disabled {
   margin-top: 0.5rem;
   font-size: 0.9rem;
   color: #7ee787;
+}
+
+/* Practice difficulty filter bar */
+
+.practice-filter {
+  margin-bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.practice-filter-label {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #f0f6fc;
+}
+
+.practice-filter-hint {
+  font-size: 0.85rem;
+}
+
+.difficulty-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.difficulty-chip {
+  border: none;
+  border-radius: 999px;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  min-width: 2.4rem;
+  text-align: center;
+  background: #30363d;
+  color: #c9d1d9;
+  opacity: 0.85;
+  transition:
+    background 0.15s ease,
+    transform 0.05s ease,
+    box-shadow 0.15s ease,
+    opacity 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+}
+
+.chip-label {
+  line-height: 1;
+}
+
+.chip-count {
+  font-size: 0.7rem;
+  opacity: 0.9;
+}
+
+.difficulty-chip:hover {
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.difficulty-chip.active {
+  box-shadow: 0 0 0 2px #f0f6fc33;
+  opacity: 1;
+}
+
+/* "All" chip: blue/gray blend */
+.difficulty-all {
+  background: linear-gradient(90deg, #58a6ff, #8b949e);
+  color: #0d1117;
+}
+
+/* Unsorted / unrated: neutral gray */
+.difficulty-unrated {
+  background: #6e7681;
+  color: #f0f6fc;
+}
+
+/* Rainbow-like difficulty colors 1–10 */
+
+.difficulty-1 {
+  background: #f85149; /* red */
+  color: #0d1117;
+}
+
+.difficulty-2 {
+  background: #ffa657; /* orange */
+  color: #0d1117;
+}
+
+.difficulty-3 {
+  background: #f5d23c; /* yellow */
+  color: #0d1117;
+}
+
+.difficulty-4 {
+  background: #a3e635; /* yellow-green */
+  color: #0d1117;
+}
+
+.difficulty-5 {
+  background: #22c55e; /* green */
+  color: #0d1117;
+}
+
+.difficulty-6 {
+  background: #14b8a6; /* teal */
+  color: #0d1117;
+}
+
+.difficulty-7 {
+  background: #06b6d4; /* cyan */
+  color: #0d1117;
+}
+
+.difficulty-8 {
+  background: #3b82f6; /* blue */
+  color: #0d1117;
+}
+
+.difficulty-9 {
+  background: #6366f1; /* indigo */
+  color: #f9fafb;
+}
+
+.difficulty-10 {
+  background: #a855f7; /* purple */
+  color: #f9fafb;
 }
 
 /* Card list table */
@@ -421,11 +585,28 @@ button:disabled {
   white-space: pre-line;
 }
 
+.card-image-thumb {
+  position: relative;
+  display: inline-block;
+}
+
 .card-image-thumb img {
   max-width: 80px;
   max-height: 60px;
   object-fit: cover;
   border-radius: 0.3rem;
+  border: 1px solid #30363d;
+}
+
+.thumb-counter {
+  position: absolute;
+  right: -0.45rem;
+  bottom: -0.45rem;
+  background: #0d1117;
+  color: #f0f6fc;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 999px;
   border: 1px solid #30363d;
 }
 
