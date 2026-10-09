@@ -27,6 +27,30 @@ export type PullPreviewAction =
   | 'would-ignore-known'
   | 'blocked-missing-parent';
 
+export type BootstrapMode =
+  | 'already-initialized'
+  | 'initialize-empty'
+  | 'upload-local'
+  | 'download-server'
+  | 'resume-local-upload'
+  | 'blocked-mixed';
+
+export interface BootstrapAssessment {
+  mode: BootstrapMode;
+
+  safeToProceed: boolean;
+
+  reason: string;
+
+  localHasData: boolean;
+
+  serverHasHistory: boolean;
+
+  serverHasActiveData: boolean;
+
+  resumableUploadDetected: boolean;
+}
+
 export interface PullPreviewItem {
   entityType: PullPreviewEntityType;
 
@@ -59,6 +83,8 @@ export interface PullPreviewReport {
   serverRevision: number;
 
   metadataInitialized: boolean;
+
+  bootstrap: BootstrapAssessment;
 
   mutatesLocalState: false;
 
@@ -105,6 +131,7 @@ export class SyncEngineService {
    * - reads stored device auth
    * - performs GET /api/sync/pull
    * - analyses what a future sync WOULD do
+   * - classifies the required bootstrap mode
    *
    * It deliberately does NOT:
    *
@@ -158,6 +185,8 @@ export class SyncEngineService {
       serverRevision: report.serverRevision,
 
       metadataInitialized: report.metadataInitialized,
+
+      bootstrap: report.bootstrap,
 
       local: report.local,
 
@@ -288,6 +317,8 @@ export class SyncEngineService {
       actionCounts[item.action] = (actionCounts[item.action] ?? 0) + 1;
     }
 
+    const bootstrap = this.assessBootstrap(localState, meta, response);
+
     return {
       generatedAt: new Date().toISOString(),
 
@@ -296,6 +327,8 @@ export class SyncEngineService {
       serverRevision: response.server_revision,
 
       metadataInitialized: meta.initialized,
+
+      bootstrap,
 
       mutatesLocalState: false,
 
@@ -325,7 +358,382 @@ export class SyncEngineService {
     };
   }
 
-  private previewDeck(deck: ApiDeck, localExists: boolean, meta: StoredSyncMeta): PullPreviewItem {
+  private assessBootstrap(
+    localState: ReturnType<FlashcardsStateService['getState']>,
+
+    meta: StoredSyncMeta,
+
+    response: PullResponse,
+  ): BootstrapAssessment {
+    const localHasData = this.localStateHasData(localState);
+
+    const serverHasHistory =
+      response.server_revision > 0 ||
+      response.decks.length > 0 ||
+      response.cards.length > 0 ||
+      response.images.length > 0;
+
+    const serverHasActiveData =
+      response.decks.some((deck) => !deck.deleted_at) ||
+      response.cards.some((card) => !card.deleted_at) ||
+      response.images.some((image) => !image.deleted_at);
+
+    if (meta.initialized) {
+      return {
+        mode: 'already-initialized',
+
+        safeToProceed: true,
+
+        reason:
+          'This client has already completed bootstrap. Normal incremental synchronization should be used.',
+
+        localHasData,
+
+        serverHasHistory,
+
+        serverHasActiveData,
+
+        resumableUploadDetected: false,
+      };
+    }
+
+    if (!localHasData && !serverHasHistory) {
+      return {
+        mode: 'initialize-empty',
+
+        safeToProceed: true,
+
+        reason:
+          'Both the local client and the server are empty. Bootstrap only needs to mark this client initialized at server revision 0.',
+
+        localHasData,
+
+        serverHasHistory,
+
+        serverHasActiveData,
+
+        resumableUploadDetected: false,
+      };
+    }
+
+    if (localHasData && !serverHasHistory) {
+      return {
+        mode: 'upload-local',
+
+        safeToProceed: true,
+
+        reason:
+          'Local flashcards exist and the server is empty. The local dataset can become the initial server dataset.',
+
+        localHasData,
+
+        serverHasHistory,
+
+        serverHasActiveData,
+
+        resumableUploadDetected: false,
+      };
+    }
+
+    if (!localHasData && serverHasHistory) {
+      return {
+        mode: 'download-server',
+
+        safeToProceed: true,
+
+        reason:
+          'The local client is empty and the server already has sync history. The server dataset can bootstrap this client.',
+
+        localHasData,
+
+        serverHasHistory,
+
+        serverHasActiveData,
+
+        resumableUploadDetected: false,
+      };
+    }
+
+    const resumableUpload = this.isResumableLocalBootstrap(localState, meta, response);
+
+    if (resumableUpload) {
+      return {
+        mode: 'resume-local-upload',
+
+        safeToProceed: true,
+
+        reason:
+          'Local data and server data both exist, but the remote objects exactly match entities already acknowledged during an unfinished local-first bootstrap. The upload can safely resume.',
+
+        localHasData,
+
+        serverHasHistory,
+
+        serverHasActiveData,
+
+        resumableUploadDetected: true,
+      };
+    }
+
+    return {
+      mode: 'blocked-mixed',
+
+      safeToProceed: false,
+
+      reason:
+        'Both local and server data exist on an uninitialized client, and the server state cannot be proven to belong to an interrupted local-first bootstrap. Automatic bootstrap must stop to avoid silent merging or data loss.',
+
+      localHasData,
+
+      serverHasHistory,
+
+      serverHasActiveData,
+
+      resumableUploadDetected: false,
+    };
+  }
+
+  private localStateHasData(localState: ReturnType<FlashcardsStateService['getState']>): boolean {
+    if (localState.decks.length > 0) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private isResumableLocalBootstrap(
+    localState: ReturnType<FlashcardsStateService['getState']>,
+
+    meta: StoredSyncMeta,
+
+    response: PullResponse,
+  ): boolean {
+    /*
+     * A local-first bootstrap never creates tombstones.
+     * Seeing one means the server has history that cannot
+     * be explained purely by our interrupted initial upload.
+     */
+    if (
+      response.decks.some((deck) => !!deck.deleted_at) ||
+      response.cards.some((card) => !!card.deleted_at) ||
+      response.images.some((image) => !!image.deleted_at)
+    ) {
+      return false;
+    }
+
+    const localDecks = new Map(localState.decks.map((deck) => [deck.id, deck]));
+
+    const localCards = new Map<
+      string,
+      {
+        deckId: string;
+        card: ReturnType<FlashcardsStateService['getState']>['decks'][number]['cards'][number];
+      }
+    >();
+
+    const localImages = new Map<
+      string,
+      {
+        cardId: string;
+        side: 'front' | 'back';
+        position: number;
+      }
+    >();
+
+    for (const deck of localState.decks) {
+      for (const card of deck.cards) {
+        localCards.set(card.id, {
+          deckId: deck.id,
+
+          card,
+        });
+
+        card.front.images.forEach((image, position) => {
+          localImages.set(image.id, {
+            cardId: card.id,
+
+            side: 'front',
+
+            position,
+          });
+        });
+
+        card.back.images.forEach((image, position) => {
+          localImages.set(image.id, {
+            cardId: card.id,
+
+            side: 'back',
+
+            position,
+          });
+        });
+      }
+    }
+
+    /*
+     * Every local entity must already have bootstrap
+     * metadata. This is what distinguishes a deliberate,
+     * resumable bootstrap from arbitrary mixed data.
+     */
+    for (const deck of localState.decks) {
+      if (!this.isSafeBootstrapRecord(meta.decks[deck.id])) {
+        return false;
+      }
+
+      for (const card of deck.cards) {
+        if (!this.isSafeBootstrapRecord(meta.cards[card.id])) {
+          return false;
+        }
+
+        for (const image of card.front.images) {
+          if (!this.isSafeBootstrapRecord(meta.images[image.id])) {
+            return false;
+          }
+        }
+
+        for (const image of card.back.images) {
+          if (!this.isSafeBootstrapRecord(meta.images[image.id])) {
+            return false;
+          }
+        }
+      }
+    }
+
+    /*
+     * Every remote entity must exist locally and must
+     * exactly match a clean server revision that this
+     * client already acknowledged.
+     */
+    for (const deck of response.decks) {
+      const local = localDecks.get(deck.id);
+
+      const record = meta.decks[deck.id];
+
+      if (
+        !local ||
+        !record ||
+        record.pendingOperation !== null ||
+        record.conflict !== null ||
+        record.revision !== deck.revision ||
+        record.baseRevision !== deck.revision ||
+        !record.lastSyncedSnapshot
+      ) {
+        return false;
+      }
+
+      const snapshot = record.lastSyncedSnapshot;
+
+      if (
+        snapshot.id !== deck.id ||
+        snapshot.name !== deck.name ||
+        (snapshot.description ?? undefined) !== (deck.description ?? undefined)
+      ) {
+        return false;
+      }
+    }
+
+    for (const card of response.cards) {
+      const local = localCards.get(card.id);
+
+      const record = meta.cards[card.id];
+
+      if (
+        !local ||
+        !record ||
+        record.pendingOperation !== null ||
+        record.conflict !== null ||
+        record.revision !== card.revision ||
+        record.baseRevision !== card.revision ||
+        !record.lastSyncedSnapshot
+      ) {
+        return false;
+      }
+
+      const snapshot = record.lastSyncedSnapshot;
+
+      if (
+        snapshot.id !== card.id ||
+        snapshot.deckId !== card.deck_id ||
+        snapshot.frontText !== card.front_text ||
+        snapshot.backText !== card.back_text ||
+        snapshot.difficulty !== card.difficulty ||
+        snapshot.lastReviewedAt !== (card.last_reviewed_at ?? null)
+      ) {
+        return false;
+      }
+    }
+
+    for (const image of response.images) {
+      const local = localImages.get(image.id);
+
+      const record = meta.images[image.id];
+
+      if (
+        !local ||
+        !record ||
+        record.pendingOperation !== null ||
+        record.conflict !== null ||
+        record.revision !== image.revision ||
+        record.baseRevision !== image.revision ||
+        !record.lastSyncedSnapshot
+      ) {
+        return false;
+      }
+
+      const snapshot = record.lastSyncedSnapshot;
+
+      if (
+        snapshot.id !== image.id ||
+        snapshot.cardId !== image.card_id ||
+        snapshot.side !== image.side ||
+        snapshot.position !== image.position
+      ) {
+        return false;
+      }
+    }
+
+    /*
+     * There must be at least one acknowledged remote
+     * entity; otherwise this is not a resume situation.
+     */
+    return response.decks.length > 0 || response.cards.length > 0 || response.images.length > 0;
+  }
+
+  private isSafeBootstrapRecord<TSnapshot>(
+    record: EntitySyncRecord<TSnapshot> | undefined,
+  ): boolean {
+    if (!record) {
+      return false;
+    }
+
+    if (record.conflict) {
+      return false;
+    }
+
+    if (record.pendingOperation === 'create') {
+      return (
+        record.revision === 0 && record.baseRevision === 0 && record.lastSyncedSnapshot === null
+      );
+    }
+
+    if (record.pendingOperation === null) {
+      return (
+        record.revision > 0 &&
+        record.baseRevision === record.revision &&
+        record.lastSyncedSnapshot !== null
+      );
+    }
+
+    return false;
+  }
+
+  private previewDeck(
+    deck: ApiDeck,
+
+    localExists: boolean,
+
+    meta: StoredSyncMeta,
+  ): PullPreviewItem {
     return this.previewEntity(
       'deck',
 
@@ -341,7 +749,13 @@ export class SyncEngineService {
     );
   }
 
-  private previewCard(card: ApiCard, localExists: boolean, meta: StoredSyncMeta): PullPreviewItem {
+  private previewCard(
+    card: ApiCard,
+
+    localExists: boolean,
+
+    meta: StoredSyncMeta,
+  ): PullPreviewItem {
     return this.previewEntity(
       'card',
 
@@ -359,7 +773,9 @@ export class SyncEngineService {
 
   private previewImage(
     image: ApiCardImage,
+
     localExists: boolean,
+
     meta: StoredSyncMeta,
   ): PullPreviewItem {
     const item = this.previewEntity(
@@ -538,7 +954,11 @@ export class SyncEngineService {
     );
   }
 
-  private validatePullResponse(response: PullResponse, expectedSince: number): void {
+  private validatePullResponse(
+    response: PullResponse,
+
+    expectedSince: number,
+  ): void {
     if (!Number.isSafeInteger(response.since) || response.since < 0) {
       throw new Error('Sync server returned an invalid pull "since" revision.');
     }
@@ -572,19 +992,25 @@ export class SyncEngineService {
     const entities = [
       ...response.decks.map((entity) => ({
         type: 'deck',
+
         id: entity.id,
+
         revision: entity.revision,
       })),
 
       ...response.cards.map((entity) => ({
         type: 'card',
+
         id: entity.id,
+
         revision: entity.revision,
       })),
 
       ...response.images.map((entity) => ({
         type: 'image',
+
         id: entity.id,
+
         revision: entity.revision,
       })),
     ];
