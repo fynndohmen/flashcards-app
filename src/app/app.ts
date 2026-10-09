@@ -17,6 +17,8 @@ import { FlashcardsStateService } from './flashcards-state.service';
 
 import { SyncApiError, SyncApiService } from './sync-api.service';
 
+import { PullPreviewReport, SyncEngineService } from './sync-engine.service';
+
 import { StoredDeviceAuth, SyncStorageService } from './sync-storage.service';
 
 type DeckViewMode = 'menu' | 'edit' | 'practice' | null;
@@ -24,6 +26,10 @@ type DeckViewMode = 'menu' | 'edit' | 'practice' | null;
 type PracticeDifficultyFilter = 'all' | 'unrated' | number;
 
 type SyncServerStatus = 'checking' | 'online' | 'offline';
+
+type FlashcardsDebugGlobal = typeof globalThis & {
+  flashcardsSyncPreview?: () => Promise<PullPreviewReport>;
+};
 
 @Component({
   selector: 'app-root',
@@ -91,8 +97,25 @@ export class AppComponent {
     private syncApi: SyncApiService,
 
     private syncStorage: SyncStorageService,
+
+    private syncEngine: SyncEngineService,
   ) {
+    this.installLocalDebugHelpers();
+
     void this.initializeApp();
+  }
+
+  private installLocalDebugHelpers(): void {
+    const isLocalDevelopment =
+      location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+
+    if (!isLocalDevelopment) {
+      return;
+    }
+
+    const debugGlobal = globalThis as FlashcardsDebugGlobal;
+
+    debugGlobal.flashcardsSyncPreview = () => this.syncEngine.previewPullAndLog();
   }
 
   private async initializeApp(): Promise<void> {
