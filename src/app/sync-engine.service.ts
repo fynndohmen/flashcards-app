@@ -2,6 +2,8 @@
 
 import { Injectable } from '@angular/core';
 
+import { DifficultyLevel, FlashcardsState } from './models';
+
 import { ApiCard, ApiCardImage, ApiDeck, PullResponse } from './sync-api.models';
 
 import { SyncApiError, SyncApiService } from './sync-api.service';
@@ -52,6 +54,12 @@ interface CachedLocalImage {
   fileName: string;
 }
 
+interface DownloadedRemoteImage {
+  dataUrl: string;
+  sha256: string;
+  mimeType: string;
+}
+
 interface BootstrapTransferCounts {
   decks: number;
   cards: number;
@@ -82,7 +90,11 @@ export type BootstrapMode =
   | 'blocked-mixed';
 
 export type BootstrapExecutionStatus =
-  'initialized-empty' | 'uploaded-local' | 'resumed-local-upload' | 'already-initialized';
+  | 'initialized-empty'
+  | 'uploaded-local'
+  | 'resumed-local-upload'
+  | 'downloaded-server'
+  | 'already-initialized';
 
 export interface BootstrapAssessment {
   mode: BootstrapMode;
@@ -115,9 +127,11 @@ export interface BootstrapExecutionResult {
 
   adopted: BootstrapTransferCounts;
 
+  downloaded: BootstrapTransferCounts;
+
   changedLocalMetadata: boolean;
 
-  changedLocalState: false;
+  changedLocalState: boolean;
 
   changedServerData: boolean;
 }
@@ -300,8 +314,12 @@ export class SyncEngineService {
       return this.bootstrapUploadLocal(report.bootstrap.mode);
     }
 
+    if (report.bootstrap.mode === 'download-server') {
+      return this.bootstrapDownloadServer();
+    }
+
     throw new Error(
-      `Bootstrap mode "${report.bootstrap.mode}" is not implemented yet. No automatic local/server merge was performed.`,
+      `Bootstrap mode "${report.bootstrap.mode}" is not safe for automatic execution.`,
     );
   }
 
@@ -324,6 +342,8 @@ export class SyncEngineService {
       uploaded: result.uploaded,
 
       adopted: result.adopted,
+
+      downloaded: result.downloaded,
 
       changedLocalMetadata: result.changedLocalMetadata,
 
@@ -354,6 +374,8 @@ export class SyncEngineService {
       uploaded: this.emptyTransferCounts(),
 
       adopted: this.emptyTransferCounts(),
+
+      downloaded: this.emptyTransferCounts(),
 
       changedLocalMetadata: false,
 
@@ -424,6 +446,8 @@ export class SyncEngineService {
 
       adopted: this.emptyTransferCounts(),
 
+      downloaded: this.emptyTransferCounts(),
+
       changedLocalMetadata: changed,
 
       changedLocalState: false,
@@ -431,6 +455,562 @@ export class SyncEngineService {
       changedServerData: false,
     };
   }
+
+  // -------------------------------------------------
+  // Download-server bootstrap
+  // -------------------------------------------------
+
+  private async bootstrapDownloadServer(): Promise<BootstrapExecutionResult> {
+    await this.state.whenReady();
+
+    const auth = await this.syncStorage.getDeviceAuth();
+
+    if (!auth?.token) {
+      throw new Error('This device is not registered with the sync server.');
+    }
+
+    const initialState = this.state.getState();
+
+    if (this.localStateHasData(initialState)) {
+      throw new Error('Server-first bootstrap requires an empty local flashcard state.');
+    }
+
+    const initialMeta = await this.syncStorage.getSyncMeta();
+
+    if (initialMeta.initialized) {
+      throw new Error(
+        'Server-first bootstrap cannot run because this client is already initialized.',
+      );
+    }
+
+    if (initialMeta.serverRevision !== 0) {
+      throw new Error(
+        `Uninitialized server-first bootstrap expected local serverRevision 0, found ${initialMeta.serverRevision}.`,
+      );
+    }
+
+    if (this.syncMetaHasEntityRecords(initialMeta)) {
+      throw new Error(
+        'Server-first bootstrap found existing entity sync metadata on an empty uninitialized client.',
+      );
+    }
+
+    /*
+     * Re-pull revision 0 instead of trusting the earlier
+     * preview. The preview is informational only.
+     */
+    const response = await this.syncApi.pull(0, auth.token);
+
+    this.validatePullResponse(response, 0);
+
+    this.validateRemoteBootstrapDataset(response);
+
+    if (
+      response.server_revision === 0 &&
+      response.decks.length === 0 &&
+      response.cards.length === 0 &&
+      response.images.length === 0
+    ) {
+      throw new Error(
+        'Server-first bootstrap expected server history, but the server is now empty. Run bootstrap again so the mode can be reclassified.',
+      );
+    }
+
+    const downloadedImages = await this.downloadRemoteBootstrapImages(response, auth.token);
+
+    /*
+     * No visible local mutation is allowed while the
+     * bootstrap downloads are in progress.
+     */
+    this.assertLocalStateUnchanged(initialState);
+
+    /*
+     * Make sure the server snapshot did not change while
+     * image files were being downloaded.
+     *
+     * If anything changed, no local commit has happened yet;
+     * abort and let the user retry from a fresh pull.
+     */
+    const stabilityPull = await this.syncApi.pull(response.server_revision, auth.token);
+
+    this.validatePullResponse(stabilityPull, response.server_revision);
+
+    if (
+      stabilityPull.server_revision !== response.server_revision ||
+      stabilityPull.decks.length > 0 ||
+      stabilityPull.cards.length > 0 ||
+      stabilityPull.images.length > 0
+    ) {
+      throw new Error(
+        'The sync server changed while the initial dataset was being downloaded. No local state was committed; run bootstrap again.',
+      );
+    }
+
+    this.assertLocalStateUnchanged(initialState);
+
+    const newState = this.buildStateFromRemoteBootstrap(response, downloadedImages);
+
+    const completedAt = new Date().toISOString();
+
+    const updatedMeta = await this.state.replaceStateFromSync(
+      newState,
+
+      (meta) => {
+        if (meta.initialized) {
+          throw new Error(
+            'Server-first bootstrap finalization found an already initialized client.',
+          );
+        }
+
+        if (meta.serverRevision !== 0) {
+          throw new Error(
+            `Server-first bootstrap finalization expected local serverRevision 0, found ${meta.serverRevision}.`,
+          );
+        }
+
+        if (this.syncMetaHasEntityRecords(meta)) {
+          throw new Error(
+            'Server-first bootstrap finalization found unexpected existing entity metadata.',
+          );
+        }
+
+        meta.decks = {};
+        meta.cards = {};
+        meta.images = {};
+
+        for (const deck of response.decks) {
+          meta.decks[deck.id] = this.cleanEntityRecord(
+            deck.revision,
+            this.deckSnapshotFromRemote(deck),
+          );
+        }
+
+        for (const card of response.cards) {
+          meta.cards[card.id] = this.cleanEntityRecord(
+            card.revision,
+            this.cardSnapshotFromRemote(card),
+          );
+        }
+
+        for (const image of response.images) {
+          meta.images[image.id] = this.cleanEntityRecord(
+            image.revision,
+            this.imageSnapshotFromRemote(image),
+          );
+        }
+
+        meta.initialized = true;
+
+        meta.serverRevision = response.server_revision;
+
+        meta.lastSuccessfulSyncAt = completedAt;
+      },
+    );
+
+    const downloaded = this.countActiveRemoteEntities(response);
+
+    return {
+      status: 'downloaded-server',
+
+      mode: 'download-server',
+
+      initialized: updatedMeta.initialized,
+
+      serverRevision: updatedMeta.serverRevision,
+
+      lastSuccessfulSyncAt: updatedMeta.lastSuccessfulSyncAt,
+
+      uploaded: this.emptyTransferCounts(),
+
+      adopted: this.emptyTransferCounts(),
+
+      downloaded,
+
+      changedLocalMetadata: true,
+
+      changedLocalState: downloaded.decks > 0 || downloaded.cards > 0 || downloaded.images > 0,
+
+      changedServerData: false,
+    };
+  }
+
+  private validateRemoteBootstrapDataset(response: PullResponse): void {
+    const deckIds = new Set<string>();
+
+    const cardIds = new Set<string>();
+
+    const imageIds = new Set<string>();
+
+    const decksById = new Map<string, ApiDeck>();
+
+    const cardsById = new Map<string, ApiCard>();
+
+    for (const deck of response.decks) {
+      if (deckIds.has(deck.id)) {
+        throw new Error(`Server bootstrap payload contains duplicate deck ID "${deck.id}".`);
+      }
+
+      deckIds.add(deck.id);
+
+      decksById.set(deck.id, deck);
+
+      if (deck.revision <= 0) {
+        throw new Error(`Server deck "${deck.id}" has invalid revision ${deck.revision}.`);
+      }
+
+      if (!deck.name.trim()) {
+        throw new Error(`Server deck "${deck.id}" has an empty name.`);
+      }
+
+      this.assertValidTimestamp(deck.created_at, `deck "${deck.id}" created_at`);
+
+      this.assertValidTimestamp(deck.updated_at, `deck "${deck.id}" updated_at`);
+
+      if (deck.deleted_at) {
+        this.assertValidTimestamp(deck.deleted_at, `deck "${deck.id}" deleted_at`);
+      }
+    }
+
+    for (const card of response.cards) {
+      if (cardIds.has(card.id)) {
+        throw new Error(`Server bootstrap payload contains duplicate card ID "${card.id}".`);
+      }
+
+      cardIds.add(card.id);
+
+      cardsById.set(card.id, card);
+
+      if (card.revision <= 0) {
+        throw new Error(`Server card "${card.id}" has invalid revision ${card.revision}.`);
+      }
+
+      const parentDeck = decksById.get(card.deck_id);
+
+      if (!parentDeck) {
+        throw new Error(`Server card "${card.id}" references missing deck "${card.deck_id}".`);
+      }
+
+      if (!card.deleted_at && parentDeck.deleted_at) {
+        throw new Error(
+          `Active server card "${card.id}" belongs to deleted deck "${card.deck_id}".`,
+        );
+      }
+
+      if (!Number.isSafeInteger(card.difficulty) || card.difficulty < 1 || card.difficulty > 10) {
+        throw new Error(`Server card "${card.id}" has invalid difficulty ${card.difficulty}.`);
+      }
+
+      this.assertValidTimestamp(card.created_at, `card "${card.id}" created_at`);
+
+      this.assertValidTimestamp(card.updated_at, `card "${card.id}" updated_at`);
+
+      if (card.last_reviewed_at) {
+        this.assertValidTimestamp(card.last_reviewed_at, `card "${card.id}" last_reviewed_at`);
+      }
+
+      if (card.deleted_at) {
+        this.assertValidTimestamp(card.deleted_at, `card "${card.id}" deleted_at`);
+      }
+    }
+
+    const activeImageGroups = new Map<string, ApiCardImage[]>();
+
+    for (const image of response.images) {
+      if (imageIds.has(image.id)) {
+        throw new Error(`Server bootstrap payload contains duplicate image ID "${image.id}".`);
+      }
+
+      imageIds.add(image.id);
+
+      if (image.revision <= 0) {
+        throw new Error(`Server image "${image.id}" has invalid revision ${image.revision}.`);
+      }
+
+      const parentCard = cardsById.get(image.card_id);
+
+      if (!parentCard) {
+        throw new Error(`Server image "${image.id}" references missing card "${image.card_id}".`);
+      }
+
+      if (image.side !== 'front' && image.side !== 'back') {
+        throw new Error(`Server image "${image.id}" has invalid side "${image.side}".`);
+      }
+
+      if (!Number.isSafeInteger(image.position) || image.position < 0) {
+        throw new Error(`Server image "${image.id}" has invalid position ${image.position}.`);
+      }
+
+      this.assertValidTimestamp(image.created_at, `image "${image.id}" created_at`);
+
+      this.assertValidTimestamp(image.updated_at, `image "${image.id}" updated_at`);
+
+      if (image.deleted_at) {
+        this.assertValidTimestamp(image.deleted_at, `image "${image.id}" deleted_at`);
+      }
+
+      if (image.deleted_at) {
+        continue;
+      }
+
+      if (parentCard.deleted_at) {
+        throw new Error(
+          `Active server image "${image.id}" belongs to deleted card "${image.card_id}".`,
+        );
+      }
+
+      const mimeType = image.mime_type?.toLowerCase();
+
+      if (!mimeType || !this.isSupportedImageMimeType(mimeType)) {
+        throw new Error(
+          `Active server image "${image.id}" has unsupported MIME type "${image.mime_type ?? 'missing'}".`,
+        );
+      }
+
+      if (!image.sha256 || !/^[0-9a-f]{64}$/i.test(image.sha256)) {
+        throw new Error(`Active server image "${image.id}" has no valid SHA-256 digest.`);
+      }
+
+      const groupKey = `${image.card_id}\u0000${image.side}`;
+
+      const group = activeImageGroups.get(groupKey) ?? [];
+
+      group.push(image);
+
+      activeImageGroups.set(groupKey, group);
+    }
+
+    /*
+     * Active images are represented locally as ordered
+     * arrays. Require exact contiguous server positions.
+     */
+    for (const group of activeImageGroups.values()) {
+      group.sort((a, b) => a.position - b.position);
+
+      group.forEach((image, index) => {
+        if (image.position !== index) {
+          throw new Error(
+            `Server image positions for card "${image.card_id}" side "${image.side}" are not contiguous from 0.`,
+          );
+        }
+      });
+    }
+  }
+
+  private async downloadRemoteBootstrapImages(
+    response: PullResponse,
+
+    token: string,
+  ): Promise<Map<string, DownloadedRemoteImage>> {
+    const result = new Map<string, DownloadedRemoteImage>();
+
+    const activeImages = response.images
+      .filter((image) => !image.deleted_at)
+      .sort(
+        (a, b) =>
+          a.card_id.localeCompare(b.card_id) ||
+          a.side.localeCompare(b.side) ||
+          a.position - b.position,
+      );
+
+    for (const image of activeImages) {
+      const blob = await this.syncApi.downloadImage(image.id, token);
+
+      const expectedMimeType = image.mime_type!.toLowerCase();
+
+      const actualMimeType = blob.type.toLowerCase();
+
+      if (actualMimeType && actualMimeType !== expectedMimeType) {
+        throw new Error(
+          `Downloaded image "${image.id}" MIME type "${actualMimeType}" does not match server metadata "${expectedMimeType}".`,
+        );
+      }
+
+      const sha256 = await this.sha256Blob(blob);
+
+      if (sha256 !== image.sha256!.toLowerCase()) {
+        throw new Error(`Downloaded image "${image.id}" failed SHA-256 verification.`);
+      }
+
+      const dataUrl = await this.blobToDataUrl(blob);
+
+      result.set(image.id, {
+        dataUrl,
+        sha256,
+        mimeType: expectedMimeType,
+      });
+    }
+
+    return result;
+  }
+
+  private buildStateFromRemoteBootstrap(
+    response: PullResponse,
+
+    downloadedImages: Map<string, DownloadedRemoteImage>,
+  ): FlashcardsState {
+    const activeDecks = response.decks
+      .filter((deck) => !deck.deleted_at)
+      .sort((a, b) => this.compareRemoteCreationOrder(a.created_at, a.id, b.created_at, b.id));
+
+    const activeCards = response.cards
+      .filter((card) => !card.deleted_at)
+      .sort((a, b) => this.compareRemoteCreationOrder(a.created_at, a.id, b.created_at, b.id));
+
+    const activeImages = response.images
+      .filter((image) => !image.deleted_at)
+      .sort(
+        (a, b) =>
+          a.card_id.localeCompare(b.card_id) ||
+          a.side.localeCompare(b.side) ||
+          a.position - b.position,
+      );
+
+    const decks: FlashcardsState['decks'] = activeDecks.map((deck) => ({
+      id: deck.id,
+
+      name: deck.name,
+
+      description: deck.description?.trim() || undefined,
+
+      cards: [],
+    }));
+
+    const decksById = new Map(decks.map((deck) => [deck.id, deck]));
+
+    const cardsById = new Map<string, LocalCard>();
+
+    for (const remoteCard of activeCards) {
+      const deck = decksById.get(remoteCard.deck_id);
+
+      if (!deck) {
+        throw new Error(
+          `Active remote card "${remoteCard.id}" cannot be attached to deck "${remoteCard.deck_id}".`,
+        );
+      }
+
+      const card: LocalCard = {
+        id: remoteCard.id,
+
+        front: {
+          text: remoteCard.front_text,
+
+          images: [],
+        },
+
+        back: {
+          text: remoteCard.back_text,
+
+          images: [],
+        },
+
+        difficulty: remoteCard.difficulty as DifficultyLevel,
+
+        createdAt: remoteCard.created_at,
+
+        updatedAt: remoteCard.updated_at,
+
+        lastReviewedAt: remoteCard.last_reviewed_at ?? null,
+      };
+
+      deck.cards.push(card);
+
+      cardsById.set(card.id, card);
+    }
+
+    for (const remoteImage of activeImages) {
+      const card = cardsById.get(remoteImage.card_id);
+
+      if (!card) {
+        throw new Error(
+          `Active remote image "${remoteImage.id}" cannot be attached to card "${remoteImage.card_id}".`,
+        );
+      }
+
+      const downloaded = downloadedImages.get(remoteImage.id);
+
+      if (!downloaded) {
+        throw new Error(`Downloaded bytes for image "${remoteImage.id}" are missing.`);
+      }
+
+      const localImage: LocalImage = {
+        id: remoteImage.id,
+
+        dataUrl: downloaded.dataUrl,
+      };
+
+      if (remoteImage.side === 'front') {
+        card.front.images.push(localImage);
+      } else {
+        card.back.images.push(localImage);
+      }
+    }
+
+    return {
+      decks,
+    };
+  }
+
+  private cleanEntityRecord<TSnapshot>(
+    revision: number,
+
+    snapshot: TSnapshot,
+  ): EntitySyncRecord<TSnapshot> {
+    return {
+      revision,
+
+      baseRevision: revision,
+
+      pendingOperation: null,
+
+      lastSyncedSnapshot: this.clone(snapshot),
+
+      conflict: null,
+    };
+  }
+
+  private countActiveRemoteEntities(response: PullResponse): BootstrapTransferCounts {
+    return {
+      decks: response.decks.filter((deck) => !deck.deleted_at).length,
+
+      cards: response.cards.filter((card) => !card.deleted_at).length,
+
+      images: response.images.filter((image) => !image.deleted_at).length,
+    };
+  }
+
+  private compareRemoteCreationOrder(
+    createdA: string,
+
+    idA: string,
+
+    createdB: string,
+
+    idB: string,
+  ): number {
+    const timeA = Date.parse(createdA);
+
+    const timeB = Date.parse(createdB);
+
+    if (timeA !== timeB) {
+      return timeA - timeB;
+    }
+
+    return idA.localeCompare(idB);
+  }
+
+  private assertValidTimestamp(
+    value: string,
+
+    label: string,
+  ): void {
+    if (typeof value !== 'string' || !value || !Number.isFinite(Date.parse(value))) {
+      throw new Error(`Server bootstrap payload contains invalid ${label}.`);
+    }
+  }
+
+  // -------------------------------------------------
+  // Upload-local bootstrap
+  // -------------------------------------------------
 
   private async bootstrapUploadLocal(
     requestedMode: 'upload-local' | 'resume-local-upload',
@@ -451,22 +1031,10 @@ export class SyncEngineService {
 
     const indexes = this.buildLocalIndexes(initialState);
 
-    /*
-     * Make sure every local entity has a bootstrap record.
-     *
-     * This is essential for old production data that existed
-     * before dirty-state tracking was introduced.
-     */
     await this.ensureLocalBootstrapMetadata(initialState, indexes);
 
     this.assertLocalStateUnchanged(initialState);
 
-    /*
-     * Always pull from revision 0 during bootstrap.
-     *
-     * The global cursor deliberately stays at 0 until the
-     * ENTIRE local graph has been uploaded and verified.
-     */
     const serverBefore = await this.syncApi.pull(0, auth.token);
 
     this.validatePullResponse(serverBefore, 0);
@@ -492,10 +1060,6 @@ export class SyncEngineService {
 
     this.assertLocalStateUnchanged(initialState);
 
-    /*
-     * The final verification pull is the ONLY source of the
-     * global sync cursor.
-     */
     const finalPull = await this.syncApi.pull(0, auth.token);
 
     this.validatePullResponse(finalPull, 0);
@@ -523,6 +1087,8 @@ export class SyncEngineService {
 
       adopted,
 
+      downloaded: this.emptyTransferCounts(),
+
       changedLocalMetadata: true,
 
       changedLocalState: false,
@@ -537,6 +1103,7 @@ export class SyncEngineService {
 
   private async ensureLocalBootstrapMetadata(
     localState: LocalState,
+
     indexes: LocalIndexes,
   ): Promise<void> {
     await this.syncStorage.updateSyncMeta((meta) => {
@@ -659,7 +1226,7 @@ export class SyncEngineService {
   }
 
   // -------------------------------------------------
-  // Interrupted-bootstrap reconciliation
+  // Interrupted local-first bootstrap reconciliation
   // -------------------------------------------------
 
   private async reconcileExistingBootstrapData(
@@ -997,20 +1564,6 @@ export class SyncEngineService {
 
         uploaded.images += 1;
       } catch (error) {
-        /*
-         * Image creation uses multipart POST and duplicate
-         * IDs return HTTP 409 instead of a normal conflict
-         * payload.
-         *
-         * This can happen after:
-         *
-         *   server committed upload
-         *   client lost response
-         *   browser retried bootstrap
-         *
-         * A full pull plus SHA-256 comparison lets us safely
-         * adopt that already-created image.
-         */
         if (!(error instanceof SyncApiError) || error.status !== 409) {
           throw error;
         }
@@ -1043,7 +1596,7 @@ export class SyncEngineService {
   }
 
   // -------------------------------------------------
-  // Final bootstrap verification
+  // Final local-first verification
   // -------------------------------------------------
 
   private async verifyCompleteRemoteDataset(
@@ -1354,7 +1907,7 @@ export class SyncEngineService {
   }
 
   // -------------------------------------------------
-  // Local images
+  // Local image helpers
   // -------------------------------------------------
 
   private async getCachedLocalImage(
@@ -1370,9 +1923,7 @@ export class SyncEngineService {
 
     const blob = await this.dataUrlToBlob(entry.image.dataUrl);
 
-    const allowedTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-
-    if (!allowedTypes.has(blob.type)) {
+    if (!this.isSupportedImageMimeType(blob.type)) {
       throw new Error(
         `Image "${entry.image.id}" has unsupported MIME type "${blob.type || 'unknown'}".`,
       );
@@ -1409,6 +1960,28 @@ export class SyncEngineService {
     return response.blob();
   }
 
+  private blobToDataUrl(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+
+      reader.onerror = () => {
+        reject(reader.error ?? new Error('Could not convert downloaded image to a data URL.'));
+      };
+
+      reader.onload = () => {
+        if (typeof reader.result !== 'string') {
+          reject(new Error('Downloaded image conversion did not produce a data URL.'));
+
+          return;
+        }
+
+        resolve(reader.result);
+      };
+
+      reader.readAsDataURL(blob);
+    });
+  }
+
   private async sha256Blob(blob: Blob): Promise<string> {
     if (!globalThis.crypto?.subtle) {
       throw new Error('Web Crypto SHA-256 is not available in this browser.');
@@ -1421,6 +1994,15 @@ export class SyncEngineService {
     return Array.from(new Uint8Array(digest))
       .map((value) => value.toString(16).padStart(2, '0'))
       .join('');
+  }
+
+  private isSupportedImageMimeType(mimeType: string): boolean {
+    return (
+      mimeType === 'image/png' ||
+      mimeType === 'image/jpeg' ||
+      mimeType === 'image/gif' ||
+      mimeType === 'image/webp'
+    );
   }
 
   private imageFileExtension(mimeType: string): string {
@@ -1612,6 +2194,25 @@ export class SyncEngineService {
     }
 
     if (!localHasData && !serverHasHistory) {
+      if (this.syncMetaHasEntityRecords(meta)) {
+        return {
+          mode: 'blocked-mixed',
+
+          safeToProceed: false,
+
+          reason:
+            'The local client and server are empty, but stale entity sync metadata exists on this uninitialized client.',
+
+          localHasData,
+
+          serverHasHistory,
+
+          serverHasActiveData,
+
+          resumableUploadDetected: false,
+        };
+      }
+
       return {
         mode: 'initialize-empty',
 
@@ -1649,6 +2250,25 @@ export class SyncEngineService {
     }
 
     if (!localHasData && serverHasHistory) {
+      if (this.syncMetaHasEntityRecords(meta)) {
+        return {
+          mode: 'blocked-mixed',
+
+          safeToProceed: false,
+
+          reason:
+            'The local client is empty, but stale entity sync metadata exists. Automatic server bootstrap is unsafe.',
+
+          localHasData,
+
+          serverHasHistory,
+
+          serverHasActiveData,
+
+          resumableUploadDetected: false,
+        };
+      }
+
       return {
         mode: 'download-server',
 
@@ -1835,11 +2455,6 @@ export class SyncEngineService {
       return false;
     }
 
-    /*
-     * Server commit may have succeeded immediately before
-     * the client lost the response. In that case the local
-     * record still legitimately says "create".
-     */
     if (record.pendingOperation === 'create') {
       return (
         record.revision === 0 && record.baseRevision === 0 && record.lastSyncedSnapshot === null
@@ -2179,7 +2794,7 @@ export class SyncEngineService {
 
     if (JSON.stringify(current) !== JSON.stringify(expected)) {
       throw new Error(
-        'Local flashcard data changed while bootstrap was running. Bootstrap stopped before accepting further server state.',
+        'Local flashcard data changed while bootstrap was running. Bootstrap stopped.',
       );
     }
   }
@@ -2239,6 +2854,44 @@ export class SyncEngineService {
       side: entry.side,
 
       position: entry.position,
+    };
+  }
+
+  private deckSnapshotFromRemote(deck: ApiDeck): DeckSyncSnapshot {
+    return {
+      id: deck.id,
+
+      name: deck.name,
+
+      description: deck.description?.trim() || undefined,
+    };
+  }
+
+  private cardSnapshotFromRemote(card: ApiCard): CardSyncSnapshot {
+    return {
+      id: card.id,
+
+      deckId: card.deck_id,
+
+      frontText: card.front_text,
+
+      backText: card.back_text,
+
+      difficulty: card.difficulty as DifficultyLevel,
+
+      lastReviewedAt: card.last_reviewed_at ?? null,
+    };
+  }
+
+  private imageSnapshotFromRemote(image: ApiCardImage): ImageSyncSnapshot {
+    return {
+      id: image.id,
+
+      cardId: image.card_id,
+
+      side: image.side,
+
+      position: image.position,
     };
   }
 

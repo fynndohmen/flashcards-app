@@ -291,8 +291,11 @@ export class FlashcardsStateService {
       back: this.normalizeCardSide(raw?.back, cardId, 'back'),
 
       difficulty,
+
       createdAt,
+
       updatedAt,
+
       lastReviewedAt,
     };
   }
@@ -423,6 +426,40 @@ export class FlashcardsStateService {
 
   getDeckById(deckId: string): Deck | undefined {
     return this.getState().decks.find((deck) => deck.id === deckId);
+  }
+
+  /**
+   * Replace the complete visible flashcard state with a
+   * server-derived state while committing its sync metadata
+   * inside the SAME IndexedDB transaction.
+   *
+   * This is intentionally separate from importState():
+   * backup imports are local data, whereas this method
+   * accepts state that has already been validated as server
+   * state by the sync engine.
+   *
+   * The in-memory state changes only after the IndexedDB
+   * transaction completed successfully.
+   */
+  async replaceStateFromSync(
+    newState: FlashcardsState,
+    mutateMeta: (meta: StoredSyncMeta) => void,
+  ): Promise<StoredSyncMeta> {
+    await this.whenReady();
+
+    /*
+     * Finish any older non-sync persistence operation before
+     * the atomic state/meta replacement starts.
+     */
+    await this.persistQueue;
+
+    const normalized = this.normalizeState(newState);
+
+    const updatedMeta = await this.syncStorage.commitStateAndSyncMeta(normalized, mutateMeta);
+
+    this.state = this.clone(normalized);
+
+    return updatedMeta;
   }
 
   // -------------------------------------------------
@@ -564,6 +601,7 @@ export class FlashcardsStateService {
       difficulty,
 
       createdAt: now,
+
       updatedAt: now,
 
       lastReviewedAt: null,
@@ -745,14 +783,21 @@ export class FlashcardsStateService {
   private deckSnapshot(deck: Deck): DeckSyncSnapshot {
     return {
       id: deck.id,
+
       name: deck.name,
+
       description: deck.description,
     };
   }
 
-  private cardSnapshot(deckId: string, card: Flashcard): CardSyncSnapshot {
+  private cardSnapshot(
+    deckId: string,
+
+    card: Flashcard,
+  ): CardSyncSnapshot {
     return {
       id: card.id,
+
       deckId,
 
       frontText: card.front.text,
@@ -767,19 +812,29 @@ export class FlashcardsStateService {
 
   private imageSnapshot(
     image: CardImageContent,
+
     cardId: string,
+
     side: CardSideName,
+
     position: number,
   ): ImageSyncSnapshot {
     return {
       id: image.id,
+
       cardId,
+
       side,
+
       position,
     };
   }
 
-  private markNewCardImages(meta: StoredSyncMeta, card: Flashcard): void {
+  private markNewCardImages(
+    meta: StoredSyncMeta,
+
+    card: Flashcard,
+  ): void {
     card.front.images.forEach((image, position) => {
       this.markLocalCreate(
         meta.images,
@@ -797,7 +852,13 @@ export class FlashcardsStateService {
     });
   }
 
-  private markImageDifferences(meta: StoredSyncMeta, before: Flashcard, after: Flashcard): void {
+  private markImageDifferences(
+    meta: StoredSyncMeta,
+
+    before: Flashcard,
+
+    after: Flashcard,
+  ): void {
     this.markImageSideDifferences(
       meta,
       before.id,
@@ -811,9 +872,13 @@ export class FlashcardsStateService {
 
   private markImageSideDifferences(
     meta: StoredSyncMeta,
+
     cardId: string,
+
     side: CardSideName,
+
     beforeImages: CardImageContent[],
+
     afterImages: CardImageContent[],
   ): void {
     const beforeById = new Map(
@@ -879,7 +944,9 @@ export class FlashcardsStateService {
 
   private markLocalCreate<TSnapshot>(
     map: Record<string, EntitySyncRecord<TSnapshot>>,
+
     entityId: string,
+
     localSnapshot: TSnapshot,
   ): void {
     const existing = map[entityId];
@@ -887,9 +954,13 @@ export class FlashcardsStateService {
     if (!existing) {
       map[entityId] = {
         revision: 0,
+
         baseRevision: 0,
+
         pendingOperation: 'create',
+
         lastSyncedSnapshot: null,
+
         conflict: null,
       };
 
@@ -915,6 +986,7 @@ export class FlashcardsStateService {
     }
 
     existing.revision = 0;
+
     existing.baseRevision = 0;
 
     existing.pendingOperation = 'create';
@@ -926,7 +998,9 @@ export class FlashcardsStateService {
 
   private markLocalUpdate<TSnapshot>(
     map: Record<string, EntitySyncRecord<TSnapshot>>,
+
     entityId: string,
+
     localSnapshot: TSnapshot,
   ): void {
     const existing = map[entityId];
@@ -939,9 +1013,13 @@ export class FlashcardsStateService {
        */
       map[entityId] = {
         revision: 0,
+
         baseRevision: 0,
+
         pendingOperation: 'create',
+
         lastSyncedSnapshot: null,
+
         conflict: null,
       };
 
@@ -975,7 +1053,9 @@ export class FlashcardsStateService {
 
   private markLocalDelete<TSnapshot>(
     map: Record<string, EntitySyncRecord<TSnapshot>>,
+
     entityId: string,
+
     localSnapshot: TSnapshot,
   ): void {
     const existing = map[entityId];
@@ -989,9 +1069,13 @@ export class FlashcardsStateService {
     if (!existing) {
       map[entityId] = {
         revision: 0,
+
         baseRevision: 0,
+
         pendingOperation: 'delete',
+
         lastSyncedSnapshot: null,
+
         conflict: null,
       };
 
@@ -1009,7 +1093,9 @@ export class FlashcardsStateService {
 
   private updateConflictLocal<TSnapshot>(
     record: EntitySyncRecord<TSnapshot>,
+
     localSnapshot: TSnapshot,
+
     deleted: boolean,
   ): void {
     if (!record.conflict) {
@@ -1056,15 +1142,21 @@ export class FlashcardsStateService {
 
   private deterministicLegacyImageId(
     cardId: string,
+
     sideName: CardSideName,
+
     position: number,
+
     dataUrl: string,
   ): string {
     const input = `${cardId}\u0000` + `${sideName}\u0000` + `${position}\u0000` + dataUrl;
 
     let h1 = 1779033703;
+
     let h2 = 3144134277;
+
     let h3 = 1013904242;
+
     let h4 = 2773480762;
 
     for (let i = 0; i < input.length; i += 1) {
@@ -1088,8 +1180,11 @@ export class FlashcardsStateService {
     h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
 
     h1 ^= h2 ^ h3 ^ h4;
+
     h2 ^= h1;
+
     h3 ^= h1;
+
     h4 ^= h1;
 
     const hex = [h1, h2, h3, h4]
