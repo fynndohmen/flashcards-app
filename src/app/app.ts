@@ -98,7 +98,6 @@ export class AppComponent {
   private async initializeApp(): Promise<void> {
     try {
       await this.state.whenReady();
-
       this.reloadDecks();
     } catch (err) {
       console.error('Failed to initialize app', err);
@@ -348,19 +347,25 @@ export class AppComponent {
     }
   }
 
-  createDeck(): void {
+  async createDeck(): Promise<void> {
     const name = this.newDeckName.trim();
 
     if (!name) {
       return;
     }
 
-    this.state.createDeck(name, this.newDeckDescription);
+    try {
+      await this.state.createDeck(name, this.newDeckDescription);
 
-    this.newDeckName = '';
-    this.newDeckDescription = '';
+      this.newDeckName = '';
+      this.newDeckDescription = '';
 
-    this.reloadDecks();
+      this.reloadDecks();
+    } catch (err) {
+      console.error('Failed to create deck', err);
+
+      alert('Could not save the new deck. Please try again.');
+    }
   }
 
   selectDeck(deck: Deck): void {
@@ -412,15 +417,23 @@ export class AppComponent {
     this.deckViewMode = 'menu';
   }
 
-  deleteDeck(deck: Deck): void {
+  async deleteDeck(deck: Deck): Promise<void> {
     if (!confirm(`Really delete deck "${deck.name}"?`)) {
       return;
     }
 
-    this.state.deleteDeck(deck.id);
+    try {
+      await this.state.deleteDeck(deck.id);
 
-    this.reloadDecks();
-    this.backToDeckList();
+      this.reloadDecks();
+      this.backToDeckList();
+    } catch (err) {
+      console.error('Failed to delete deck', err);
+
+      this.reloadDecks();
+
+      alert('Could not delete the deck. Please try again.');
+    }
   }
 
   // -------------------------------------------------
@@ -538,7 +551,7 @@ export class AppComponent {
     }));
   }
 
-  saveCard(): void {
+  async saveCard(): Promise<void> {
     const deck = this.selectedDeck;
 
     if (!deck) {
@@ -565,22 +578,30 @@ export class AppComponent {
       return;
     }
 
-    if (this.cardForm.editingCardId) {
-      this.state.updateCard(deck.id, this.cardForm.editingCardId, {
-        front,
-        back,
-      });
-    } else {
-      const defaultDifficulty: DifficultyLevel = 5;
+    try {
+      if (this.cardForm.editingCardId) {
+        await this.state.updateCard(deck.id, this.cardForm.editingCardId, {
+          front,
+          back,
+        });
+      } else {
+        const defaultDifficulty: DifficultyLevel = 5;
 
-      this.state.createCard(deck.id, front, back, defaultDifficulty);
+        await this.state.createCard(deck.id, front, back, defaultDifficulty);
+      }
+
+      this.resetCardForm();
+      this.reloadDecks();
+    } catch (err) {
+      console.error('Failed to save card', err);
+
+      this.reloadDecks();
+
+      alert('Could not save the card. Please try again.');
     }
-
-    this.resetCardForm();
-    this.reloadDecks();
   }
 
-  deleteCard(card: Flashcard): void {
+  async deleteCard(card: Flashcard): Promise<void> {
     const deck = this.selectedDeck;
 
     if (!deck) {
@@ -591,9 +612,17 @@ export class AppComponent {
       return;
     }
 
-    this.state.deleteCard(deck.id, card.id);
+    try {
+      await this.state.deleteCard(deck.id, card.id);
 
-    this.reloadDecks();
+      this.reloadDecks();
+    } catch (err) {
+      console.error('Failed to delete card', err);
+
+      this.reloadDecks();
+
+      alert('Could not delete the card. Please try again.');
+    }
   }
 
   resetCardForm(): void {
@@ -778,6 +807,8 @@ export class AppComponent {
       this.reloadDecks();
     } catch (err) {
       console.error('Failed to save difficulty', err);
+
+      this.reloadDecks();
 
       alert('Could not save the difficulty rating. Please try again.');
     }

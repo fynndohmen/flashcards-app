@@ -12,6 +12,16 @@ import {
   FlashcardsState,
 } from './models';
 
+import {
+  CardSyncSnapshot,
+  DeckSyncSnapshot,
+  EntitySyncRecord,
+  ImageSyncSnapshot,
+  StoredSyncMeta,
+} from './sync-metadata.models';
+
+import { SyncStorageService } from './sync-storage.service';
+
 const LEGACY_STORAGE_KEY = 'flashcards-app-state-v1';
 
 const DB_NAME = 'flashcards-app-db';
@@ -21,7 +31,9 @@ const STATE_KEY = 'flashcards-state-v2';
 
 type CardSideName = 'front' | 'back';
 
-@Injectable({ providedIn: 'root' })
+@Injectable({
+  providedIn: 'root',
+})
 export class FlashcardsStateService {
   private state: FlashcardsState = {
     decks: [],
@@ -31,7 +43,7 @@ export class FlashcardsStateService {
 
   private persistQueue: Promise<void> = Promise.resolve();
 
-  constructor() {
+  constructor(private syncStorage: SyncStorageService) {
     this.readyPromise = this.load();
   }
 
@@ -40,7 +52,7 @@ export class FlashcardsStateService {
   }
 
   // -------------------------------------------------
-  // Loading / persistence / migration
+  // Loading / persistence / legacy migration
   // -------------------------------------------------
 
   private async load(): Promise<void> {
@@ -52,11 +64,6 @@ export class FlashcardsStateService {
 
         this.state = this.normalizeState(indexedDbState);
 
-        /*
-         * Persist an old-format state exactly once after
-         * normalization so stable image IDs and
-         * lastReviewedAt survive future reloads.
-         */
         if (needsMigration) {
           await this.writeStateToIndexedDb(this.state);
         }
@@ -113,23 +120,30 @@ export class FlashcardsStateService {
   }
 
   private async persist(): Promise<void> {
-    try {
-      const normalized = this.normalizeState(this.state);
+    const normalized = this.normalizeState(this.state);
 
-      this.state = normalized;
+    this.state = normalized;
 
-      await this.writeStateToIndexedDb(normalized);
-    } catch (err) {
-      console.error('Failed to persist flashcards state to IndexedDB', err);
-
-      throw err;
-    }
+    await this.writeStateToIndexedDb(normalized);
   }
 
   /**
-   * Returns true when a stored state still uses any of
-   * the pre-sync formats.
+   * Local user mutations use this instead of queuePersist().
+   *
+   * Visible state and sync metadata are committed atomically.
    */
+  private async commitLocalMutation(mutateMeta: (meta: StoredSyncMeta) => void): Promise<void> {
+    const normalized = this.normalizeState(this.state);
+
+    this.state = normalized;
+
+    await this.syncStorage.commitStateAndSyncMeta(normalized, mutateMeta);
+  }
+
+  // -------------------------------------------------
+  // State normalization
+  // -------------------------------------------------
+
   private stateNeedsMigration(raw: any): boolean {
     if (!Array.isArray(raw?.decks)) {
       return true;
@@ -183,20 +197,6 @@ export class FlashcardsStateService {
     );
   }
 
-  /**
-   * Normalizes one card side.
-   *
-   * Supported input formats:
-   *
-   * New:
-   *   images: [{ id, dataUrl }]
-   *
-   * Previous:
-   *   imageDataUrls: ["data:...", ...]
-   *
-   * Very old:
-   *   imageDataUrl: "data:..."
-   */
   private normalizeCardSide(side: any, cardId: string, sideName: CardSideName): CardSideContent {
     const text = typeof side?.text === 'string' ? side.text : '';
 
@@ -243,10 +243,9 @@ export class FlashcardsStateService {
     }
 
     legacyDataUrls.forEach((dataUrl, position) => {
-      const id = this.deterministicLegacyImageId(cardId, sideName, position, dataUrl);
-
       images.push({
-        id,
+        id: this.deterministicLegacyImageId(cardId, sideName, position, dataUrl),
+
         dataUrl,
       });
     });
@@ -257,22 +256,6 @@ export class FlashcardsStateService {
     };
   }
 
-  /**
-   * Normalizes one card.
-   *
-   * Old cards did not have lastReviewedAt.
-   * To preserve the old UI's visible behavior:
-   *
-   * updatedAt === createdAt
-   *   => never reviewed
-   *
-   * updatedAt !== createdAt
-   *   => considered reviewed
-   *
-   * We cannot reconstruct the exact historical review
-   * time, so updatedAt is used as the best available
-   * timestamp for migrated reviewed cards.
-   */
   private normalizeCard(raw: any): Flashcard {
     const cardId = typeof raw?.id === 'string' && raw.id ? raw.id : this.generateId();
 
@@ -308,7 +291,6 @@ export class FlashcardsStateService {
       back: this.normalizeCardSide(raw?.back, cardId, 'back'),
 
       difficulty,
-
       createdAt,
       updatedAt,
       lastReviewedAt,
@@ -341,7 +323,7 @@ export class FlashcardsStateService {
   }
 
   // -------------------------------------------------
-  // IndexedDB
+  // IndexedDB legacy state helpers
   // -------------------------------------------------
 
   private openDatabase(): Promise<IDBDatabase> {
@@ -447,7 +429,7 @@ export class FlashcardsStateService {
   // Decks
   // -------------------------------------------------
 
-  createDeck(name: string, description?: string): Deck {
+  async createDeck(name: string, description?: string): Promise<Deck> {
     const newDeck: Deck = {
       id: this.generateId(),
 
@@ -460,20 +442,30 @@ export class FlashcardsStateService {
 
     this.state.decks.push(newDeck);
 
-    void this.queuePersist();
+    try {
+      await this.commitLocalMutation((meta) => {
+        this.markLocalCreate(meta.decks, newDeck.id, this.deckSnapshot(newDeck));
+      });
+    } catch (err) {
+      this.state.decks = this.state.decks.filter((deck) => deck.id !== newDeck.id);
+
+      throw err;
+    }
 
     return this.clone(newDeck);
   }
 
-  updateDeck(
+  async updateDeck(
     deckId: string,
     updates: Partial<Pick<Deck, 'name' | 'description'>>,
-  ): Deck | undefined {
+  ): Promise<Deck | undefined> {
     const deck = this.state.decks.find((candidate) => candidate.id === deckId);
 
     if (!deck) {
       return undefined;
     }
+
+    const before = this.clone(deck);
 
     if (typeof updates.name === 'string') {
       deck.name = updates.name.trim();
@@ -483,27 +475,75 @@ export class FlashcardsStateService {
       deck.description = updates.description.trim() || undefined;
     }
 
-    void this.queuePersist();
+    try {
+      await this.commitLocalMutation((meta) => {
+        this.markLocalUpdate(meta.decks, deck.id, this.deckSnapshot(deck));
+      });
+    } catch (err) {
+      Object.assign(deck, before);
+
+      throw err;
+    }
 
     return this.clone(deck);
   }
 
-  deleteDeck(deckId: string): void {
-    this.state.decks = this.state.decks.filter((deck) => deck.id !== deckId);
+  async deleteDeck(deckId: string): Promise<void> {
+    const index = this.state.decks.findIndex((deck) => deck.id === deckId);
 
-    void this.queuePersist();
+    if (index < 0) {
+      return;
+    }
+
+    const removedDeck = this.clone(this.state.decks[index]);
+
+    this.state.decks.splice(index, 1);
+
+    try {
+      await this.commitLocalMutation((meta) => {
+        const deckRecord = meta.decks[removedDeck.id];
+
+        if (deckRecord?.pendingOperation === 'create') {
+          delete meta.decks[removedDeck.id];
+        } else if (!deckRecord && !meta.initialized) {
+          /*
+           * Existing pre-sync local deck deleted before
+           * bootstrap: the server has never been told
+           * about it, so no tombstone is needed.
+           */
+        } else {
+          this.markLocalDelete(meta.decks, removedDeck.id, this.deckSnapshot(removedDeck));
+        }
+
+        for (const card of removedDeck.cards) {
+          delete meta.cards[card.id];
+
+          for (const image of card.front.images) {
+            delete meta.images[image.id];
+          }
+
+          for (const image of card.back.images) {
+            delete meta.images[image.id];
+          }
+        }
+      });
+    } catch (err) {
+      this.state.decks.splice(index, 0, removedDeck);
+
+      throw err;
+    }
   }
 
   // -------------------------------------------------
   // Cards
   // -------------------------------------------------
 
-  createCard(
+  async createCard(
     deckId: string,
     front: CardSideContent,
     back: CardSideContent,
     difficulty: DifficultyLevel,
-  ): Flashcard | undefined {
+  ): Promise<Flashcard | undefined> {
     const deck = this.state.decks.find((candidate) => candidate.id === deckId);
 
     if (!deck) {
@@ -531,16 +571,26 @@ export class FlashcardsStateService {
 
     deck.cards.push(newCard);
 
-    void this.queuePersist();
+    try {
+      await this.commitLocalMutation((meta) => {
+        this.markLocalCreate(meta.cards, newCard.id, this.cardSnapshot(deck.id, newCard));
+
+        this.markNewCardImages(meta, newCard);
+      });
+    } catch (err) {
+      deck.cards = deck.cards.filter((card) => card.id !== newCard.id);
+
+      throw err;
+    }
 
     return this.clone(newCard);
   }
 
-  updateCard(
+  async updateCard(
     deckId: string,
     cardId: string,
     updates: Partial<Pick<Flashcard, 'front' | 'back'>>,
-  ): Flashcard | undefined {
+  ): Promise<Flashcard | undefined> {
     const deck = this.state.decks.find((candidate) => candidate.id === deckId);
 
     if (!deck) {
@@ -553,6 +603,8 @@ export class FlashcardsStateService {
       return undefined;
     }
 
+    const before = this.clone(card);
+
     if (updates.front) {
       card.front = this.normalizeCardSide(updates.front, card.id, 'front');
     }
@@ -561,27 +613,70 @@ export class FlashcardsStateService {
       card.back = this.normalizeCardSide(updates.back, card.id, 'back');
     }
 
-    /*
-     * Normal content edits change updatedAt only.
-     * They do NOT make an unrated card reviewed.
-     */
     card.updatedAt = new Date().toISOString();
 
-    void this.queuePersist();
+    try {
+      await this.commitLocalMutation((meta) => {
+        this.markLocalUpdate(meta.cards, card.id, this.cardSnapshot(deck.id, card));
+
+        this.markImageDifferences(meta, before, card);
+      });
+    } catch (err) {
+      Object.assign(card, before);
+
+      throw err;
+    }
 
     return this.clone(card);
   }
 
-  deleteCard(deckId: string, cardId: string): void {
+  async deleteCard(deckId: string, cardId: string): Promise<void> {
     const deck = this.state.decks.find((candidate) => candidate.id === deckId);
 
     if (!deck) {
       return;
     }
 
-    deck.cards = deck.cards.filter((card) => card.id !== cardId);
+    const index = deck.cards.findIndex((card) => card.id === cardId);
 
-    void this.queuePersist();
+    if (index < 0) {
+      return;
+    }
+
+    const removedCard = this.clone(deck.cards[index]);
+
+    deck.cards.splice(index, 1);
+
+    try {
+      await this.commitLocalMutation((meta) => {
+        const record = meta.cards[removedCard.id];
+
+        if (record?.pendingOperation === 'create') {
+          delete meta.cards[removedCard.id];
+        } else if (!record && !meta.initialized) {
+          // Pre-bootstrap local-only card.
+        } else {
+          this.markLocalDelete(meta.cards, removedCard.id, this.cardSnapshot(deck.id, removedCard));
+        }
+
+        /*
+         * Server-side card deletion tombstones all
+         * child images, so they must not be pushed
+         * independently afterwards.
+         */
+        for (const image of removedCard.front.images) {
+          delete meta.images[image.id];
+        }
+
+        for (const image of removedCard.back.images) {
+          delete meta.images[image.id];
+        }
+      });
+    } catch (err) {
+      deck.cards.splice(index, 0, removedCard);
+
+      throw err;
+    }
   }
 
   async setCardDifficulty(
@@ -601,6 +696,8 @@ export class FlashcardsStateService {
       return;
     }
 
+    const before = this.clone(card);
+
     const now = new Date().toISOString();
 
     card.difficulty = difficulty;
@@ -609,7 +706,15 @@ export class FlashcardsStateService {
 
     card.lastReviewedAt = now;
 
-    await this.queuePersist();
+    try {
+      await this.commitLocalMutation((meta) => {
+        this.markLocalUpdate(meta.cards, card.id, this.cardSnapshot(deck.id, card));
+      });
+    } catch (err) {
+      Object.assign(card, before);
+
+      throw err;
+    }
   }
 
   // -------------------------------------------------
@@ -623,7 +728,297 @@ export class FlashcardsStateService {
   async importState(newState: FlashcardsState): Promise<void> {
     this.state = this.normalizeState(newState);
 
+    /*
+     * Import remains a local-state replacement for now.
+     *
+     * We deliberately do not mark every imported entity
+     * dirty until the initial/bootstrap algorithm is
+     * implemented in the next sync-engine stage.
+     */
     await this.queuePersist();
+  }
+
+  // -------------------------------------------------
+  // Sync snapshot / dirty helpers
+  // -------------------------------------------------
+
+  private deckSnapshot(deck: Deck): DeckSyncSnapshot {
+    return {
+      id: deck.id,
+      name: deck.name,
+      description: deck.description,
+    };
+  }
+
+  private cardSnapshot(deckId: string, card: Flashcard): CardSyncSnapshot {
+    return {
+      id: card.id,
+      deckId,
+
+      frontText: card.front.text,
+
+      backText: card.back.text,
+
+      difficulty: card.difficulty,
+
+      lastReviewedAt: card.lastReviewedAt,
+    };
+  }
+
+  private imageSnapshot(
+    image: CardImageContent,
+    cardId: string,
+    side: CardSideName,
+    position: number,
+  ): ImageSyncSnapshot {
+    return {
+      id: image.id,
+      cardId,
+      side,
+      position,
+    };
+  }
+
+  private markNewCardImages(meta: StoredSyncMeta, card: Flashcard): void {
+    card.front.images.forEach((image, position) => {
+      this.markLocalCreate(
+        meta.images,
+        image.id,
+        this.imageSnapshot(image, card.id, 'front', position),
+      );
+    });
+
+    card.back.images.forEach((image, position) => {
+      this.markLocalCreate(
+        meta.images,
+        image.id,
+        this.imageSnapshot(image, card.id, 'back', position),
+      );
+    });
+  }
+
+  private markImageDifferences(meta: StoredSyncMeta, before: Flashcard, after: Flashcard): void {
+    this.markImageSideDifferences(
+      meta,
+      before.id,
+      'front',
+      before.front.images,
+      after.front.images,
+    );
+
+    this.markImageSideDifferences(meta, before.id, 'back', before.back.images, after.back.images);
+  }
+
+  private markImageSideDifferences(
+    meta: StoredSyncMeta,
+    cardId: string,
+    side: CardSideName,
+    beforeImages: CardImageContent[],
+    afterImages: CardImageContent[],
+  ): void {
+    const beforeById = new Map(
+      beforeImages.map((image, position) => [
+        image.id,
+        {
+          image,
+          position,
+        },
+      ]),
+    );
+
+    const afterById = new Map(
+      afterImages.map((image, position) => [
+        image.id,
+        {
+          image,
+          position,
+        },
+      ]),
+    );
+
+    for (const [imageId, afterEntry] of afterById) {
+      if (beforeById.has(imageId)) {
+        continue;
+      }
+
+      this.markLocalCreate(
+        meta.images,
+        imageId,
+        this.imageSnapshot(afterEntry.image, cardId, side, afterEntry.position),
+      );
+    }
+
+    for (const [imageId, beforeEntry] of beforeById) {
+      if (afterById.has(imageId)) {
+        continue;
+      }
+
+      const record = meta.images[imageId];
+
+      if (record?.pendingOperation === 'create') {
+        delete meta.images[imageId];
+
+        continue;
+      }
+
+      if (!record && !meta.initialized) {
+        /*
+         * Legacy/pre-bootstrap local image removed before
+         * the server ever knew about it.
+         */
+        continue;
+      }
+
+      this.markLocalDelete(
+        meta.images,
+        imageId,
+        this.imageSnapshot(beforeEntry.image, cardId, side, beforeEntry.position),
+      );
+    }
+  }
+
+  private markLocalCreate<TSnapshot>(
+    map: Record<string, EntitySyncRecord<TSnapshot>>,
+    entityId: string,
+    localSnapshot: TSnapshot,
+  ): void {
+    const existing = map[entityId];
+
+    if (!existing) {
+      map[entityId] = {
+        revision: 0,
+        baseRevision: 0,
+        pendingOperation: 'create',
+        lastSyncedSnapshot: null,
+        conflict: null,
+      };
+
+      return;
+    }
+
+    /*
+     * If this ID already has server history, creating the
+     * same ID is unsafe. Keep the existing base rather than
+     * silently erasing its ancestry; the eventual push will
+     * surface a conflict.
+     */
+    if (existing.revision > 0 || existing.lastSyncedSnapshot) {
+      if (existing.pendingOperation === null) {
+        existing.baseRevision = existing.revision;
+      }
+
+      existing.pendingOperation = 'update';
+
+      this.updateConflictLocal(existing, localSnapshot, false);
+
+      return;
+    }
+
+    existing.revision = 0;
+    existing.baseRevision = 0;
+
+    existing.pendingOperation = 'create';
+
+    existing.lastSyncedSnapshot = null;
+
+    existing.conflict = null;
+  }
+
+  private markLocalUpdate<TSnapshot>(
+    map: Record<string, EntitySyncRecord<TSnapshot>>,
+    entityId: string,
+    localSnapshot: TSnapshot,
+  ): void {
+    const existing = map[entityId];
+
+    if (!existing) {
+      /*
+       * No known server ancestry means this is effectively
+       * a local create. This is exactly what we need for
+       * old pre-sync data during bootstrap.
+       */
+      map[entityId] = {
+        revision: 0,
+        baseRevision: 0,
+        pendingOperation: 'create',
+        lastSyncedSnapshot: null,
+        conflict: null,
+      };
+
+      return;
+    }
+
+    if (existing.pendingOperation === 'create') {
+      existing.baseRevision = 0;
+
+      this.updateConflictLocal(existing, localSnapshot, false);
+
+      return;
+    }
+
+    if (existing.pendingOperation === null) {
+      existing.baseRevision = existing.revision;
+
+      existing.pendingOperation = 'update';
+    }
+
+    /*
+     * update -> update:
+     * keep the original frozen baseRevision.
+     *
+     * delete -> edit should normally be impossible because
+     * the visible entity is gone, so we intentionally do
+     * not transform delete back into update here.
+     */
+    this.updateConflictLocal(existing, localSnapshot, false);
+  }
+
+  private markLocalDelete<TSnapshot>(
+    map: Record<string, EntitySyncRecord<TSnapshot>>,
+    entityId: string,
+    localSnapshot: TSnapshot,
+  ): void {
+    const existing = map[entityId];
+
+    if (existing?.pendingOperation === 'create') {
+      delete map[entityId];
+
+      return;
+    }
+
+    if (!existing) {
+      map[entityId] = {
+        revision: 0,
+        baseRevision: 0,
+        pendingOperation: 'delete',
+        lastSyncedSnapshot: null,
+        conflict: null,
+      };
+
+      return;
+    }
+
+    if (existing.pendingOperation === null) {
+      existing.baseRevision = existing.revision;
+    }
+
+    existing.pendingOperation = 'delete';
+
+    this.updateConflictLocal(existing, localSnapshot, true);
+  }
+
+  private updateConflictLocal<TSnapshot>(
+    record: EntitySyncRecord<TSnapshot>,
+    localSnapshot: TSnapshot,
+    deleted: boolean,
+  ): void {
+    if (!record.conflict) {
+      return;
+    }
+
+    record.conflict.local = deleted ? null : this.clone(localSnapshot);
+
+    record.conflict.localDeleted = deleted;
   }
 
   // -------------------------------------------------
@@ -659,14 +1054,6 @@ export class FlashcardsStateService {
     );
   }
 
-  /**
-   * Stable 128-bit non-cryptographic hash for legacy
-   * image migration.
-   *
-   * It is used only as an identity generator, not for
-   * security. The complete card ID, side, old position
-   * and image data all contribute to the result.
-   */
   private deterministicLegacyImageId(
     cardId: string,
     sideName: CardSideName,

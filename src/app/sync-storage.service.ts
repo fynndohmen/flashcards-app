@@ -2,6 +2,8 @@
 
 import { Injectable } from '@angular/core';
 
+import { FlashcardsState } from './models';
+
 import {
   EntitySyncRecord,
   StoredSyncMeta,
@@ -12,10 +14,10 @@ import {
 } from './sync-metadata.models';
 
 const DB_NAME = 'flashcards-app-db';
-
 const DB_VERSION = 1;
-
 const STORE_NAME = 'key_value_store';
+
+const STATE_KEY = 'flashcards-state-v2';
 
 const DEVICE_IDENTITY_KEY = 'flashcards-device-identity-v1';
 
@@ -41,19 +43,15 @@ export interface StoredDeviceAuth {
 })
 export class SyncStorageService {
   /**
-   * Serializes sync-meta modifications so two local
-   * mutations cannot overwrite each other's metadata.
+   * Serializes every sync-meta write.
+   *
+   * Local state + metadata commits also pass through
+   * this queue, preventing two local mutations from
+   * overwriting each other's metadata.
    */
   private syncMetaQueue: Promise<void> = Promise.resolve();
 
   constructor() {
-    /*
-     * The service is already instantiated by AppComponent
-     * for device enrollment.
-     *
-     * Therefore we can safely ensure that the metadata key
-     * exists without starting any network synchronization.
-     */
     void this.ensureSyncMetaExists();
   }
 
@@ -76,9 +74,7 @@ export class SyncStorageService {
 
     const identity: StoredDeviceIdentity = {
       deviceId: this.generateDeviceId(),
-
       deviceName: defaultName.trim() || 'Flashcards device',
-
       createdAt: new Date().toISOString(),
     };
 
@@ -90,9 +86,7 @@ export class SyncStorageService {
   async saveDeviceIdentity(identity: StoredDeviceIdentity): Promise<void> {
     const normalized: StoredDeviceIdentity = {
       deviceId: identity.deviceId,
-
       deviceName: identity.deviceName,
-
       createdAt: identity.createdAt,
     };
 
@@ -127,11 +121,8 @@ export class SyncStorageService {
   async saveDeviceAuth(auth: StoredDeviceAuth): Promise<void> {
     const normalized: StoredDeviceAuth = {
       deviceId: auth.deviceId,
-
       deviceName: auth.deviceName,
-
       token: auth.token,
-
       registeredAt: auth.registeredAt,
     };
 
@@ -146,23 +137,12 @@ export class SyncStorageService {
   // Sync metadata
   // -------------------------------------------------
 
-  /**
-   * Returns a cloned and normalized copy.
-   *
-   * Old metadata containing only serverRevision is
-   * automatically upgraded in memory.
-   */
   async getSyncMeta(): Promise<StoredSyncMeta> {
     await this.syncMetaQueue;
 
     return this.readSyncMetaDirect();
   }
 
-  /**
-   * Replaces the complete metadata document.
-   *
-   * Writes are serialized with updateSyncMeta().
-   */
   async saveSyncMeta(meta: StoredSyncMeta): Promise<void> {
     const task = this.syncMetaQueue.then(async () => {
       const normalized = this.normalizeSyncMeta(meta);
@@ -178,12 +158,6 @@ export class SyncStorageService {
     return task;
   }
 
-  /**
-   * Safely performs a read-modify-write cycle.
-   *
-   * This will later be used by local deck/card/image
-   * mutations as well as by the sync engine.
-   */
   async updateSyncMeta(mutate: (meta: StoredSyncMeta) => void): Promise<StoredSyncMeta> {
     let updated: StoredSyncMeta | null = null;
 
@@ -214,10 +188,43 @@ export class SyncStorageService {
   }
 
   /**
-   * Only for deliberate development/reset operations.
+   * Atomically persists the visible flashcard state
+   * together with its sync-metadata transition.
    *
-   * Device identity and bearer auth are NOT touched.
+   * Both keys are written inside one IndexedDB
+   * readwrite transaction:
+   *
+   *   flashcards-state-v2
+   *   flashcards-sync-meta-v1
+   *
+   * Therefore a successful local mutation cannot leave
+   * the visible state dirty without also recording the
+   * corresponding pending sync operation.
    */
+  async commitStateAndSyncMeta(
+    state: FlashcardsState,
+    mutate: (meta: StoredSyncMeta) => void,
+  ): Promise<StoredSyncMeta> {
+    let result: StoredSyncMeta | null = null;
+
+    const task = this.syncMetaQueue.then(async () => {
+      result = await this.writeStateAndSyncMetaTransaction(state, mutate);
+    });
+
+    this.syncMetaQueue = task.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    await task;
+
+    if (!result) {
+      throw new Error('Atomic state/sync metadata commit did not produce a result.');
+    }
+
+    return result;
+  }
+
   async clearSyncMeta(): Promise<void> {
     const task = this.syncMetaQueue.then(async () => {
       await this.deleteValue(SYNC_META_KEY);
@@ -256,6 +263,77 @@ export class SyncStorageService {
     const raw = await this.readValue<unknown>(SYNC_META_KEY);
 
     return this.normalizeSyncMeta(raw);
+  }
+
+  private async writeStateAndSyncMetaTransaction(
+    state: FlashcardsState,
+    mutate: (meta: StoredSyncMeta) => void,
+  ): Promise<StoredSyncMeta> {
+    const db = await this.openDatabase();
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+
+      const store = tx.objectStore(STORE_NAME);
+
+      const metaRequest = store.get(SYNC_META_KEY);
+
+      let normalizedMeta: StoredSyncMeta | null = null;
+
+      metaRequest.onerror = () => {
+        tx.abort();
+      };
+
+      metaRequest.onsuccess = () => {
+        try {
+          const current = this.normalizeSyncMeta(metaRequest.result);
+
+          mutate(current);
+
+          normalizedMeta = this.normalizeSyncMeta(current);
+
+          store.put(this.clone(state), STATE_KEY);
+
+          store.put(normalizedMeta, SYNC_META_KEY);
+        } catch (err) {
+          console.error('Failed to prepare atomic local mutation', err);
+
+          tx.abort();
+        }
+      };
+
+      tx.oncomplete = () => {
+        db.close();
+
+        if (!normalizedMeta) {
+          reject(new Error('Atomic transaction completed without sync metadata.'));
+
+          return;
+        }
+
+        resolve(this.clone(normalizedMeta));
+      };
+
+      tx.onerror = () => {
+        db.close();
+
+        reject(
+          tx.error ??
+            metaRequest.error ??
+            new Error('Atomic state/sync metadata transaction failed.'),
+        );
+      };
+
+      tx.onabort = () => {
+        db.close();
+
+        reject(
+          tx.error ??
+            metaRequest.error ??
+            new Error('Atomic state/sync metadata transaction was aborted.'),
+        );
+      };
+    });
   }
 
   // -------------------------------------------------
@@ -332,13 +410,6 @@ export class SyncStorageService {
         ? source['pendingOperation']
         : null;
 
-    /*
-     * A server-backed dirty entity must never accidentally
-     * advance its baseRevision while local edits are pending.
-     *
-     * For clean entries we keep baseRevision aligned with
-     * the current known server revision.
-     */
     if (pendingOperation === null) {
       baseRevision = revision;
     }
@@ -378,9 +449,7 @@ export class SyncStorageService {
 
     return {
       entityType,
-
       entityId,
-
       detectedAt,
 
       baseRevision: this.normalizeRevision(source['baseRevision']),
