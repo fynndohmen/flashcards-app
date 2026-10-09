@@ -4,9 +4,17 @@ import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 
-import { CardSideContent, Deck, DifficultyLevel, Flashcard, FlashcardsState } from './models';
+import {
+  CardImageContent,
+  CardSideContent,
+  Deck,
+  DifficultyLevel,
+  Flashcard,
+  FlashcardsState,
+} from './models';
 
 import { FlashcardsStateService } from './flashcards-state.service';
+
 import { SyncApiError, SyncApiService } from './sync-api.service';
 
 import { StoredDeviceAuth, SyncStorageService } from './sync-storage.service';
@@ -30,7 +38,9 @@ export class AppComponent {
   isAppReady = false;
 
   decks: Deck[] = [];
+
   selectedDeckId: string | null = null;
+
   deckViewMode: DeckViewMode = null;
 
   newDeckName = '';
@@ -38,15 +48,21 @@ export class AppComponent {
 
   cardForm = {
     editingCardId: null as string | null,
+
     frontText: '',
-    frontImageDataUrls: [] as string[],
+
+    frontImages: [] as CardImageContent[],
+
     backText: '',
-    backImageDataUrls: [] as string[],
+
+    backImages: [] as CardImageContent[],
   };
 
   isPracticeMode = false;
   showBackSide = false;
+
   practiceCards: Flashcard[] = [];
+
   practiceIndex = 0;
   practiceFinished = false;
 
@@ -61,6 +77,7 @@ export class AppComponent {
   enrollmentSecret = '';
 
   isDeviceRegistered = false;
+
   registeredDeviceName = '';
 
   isRegisteringDevice = false;
@@ -70,7 +87,9 @@ export class AppComponent {
 
   constructor(
     private state: FlashcardsStateService,
+
     private syncApi: SyncApiService,
+
     private syncStorage: SyncStorageService,
   ) {
     void this.initializeApp();
@@ -92,6 +111,10 @@ export class AppComponent {
     void this.initializeSyncEnrollment();
   }
 
+  // -------------------------------------------------
+  // Sync enrollment
+  // -------------------------------------------------
+
   private async initializeSyncEnrollment(): Promise<void> {
     try {
       const storedAuth = await this.syncStorage.getDeviceAuth();
@@ -107,7 +130,9 @@ export class AppComponent {
 
         await this.syncStorage.saveDeviceIdentity({
           deviceId: storedAuth.deviceId,
+
           deviceName: storedAuth.deviceName,
+
           createdAt: storedAuth.registeredAt || new Date().toISOString(),
         });
       } else {
@@ -128,6 +153,7 @@ export class AppComponent {
 
   async checkSyncServer(): Promise<void> {
     this.syncServerStatus = 'checking';
+
     this.syncServerMessage = 'Checking home sync server...';
 
     try {
@@ -135,39 +161,48 @@ export class AppComponent {
 
       if (health.status === 'ok' && health.database === 'ok') {
         this.syncServerStatus = 'online';
+
         this.syncServerMessage = 'Home sync server is reachable.';
+
         return;
       }
 
       this.syncServerStatus = 'offline';
+
       this.syncServerMessage = 'Home sync server responded, but is not healthy.';
     } catch (err) {
       console.error('Sync server health check failed', err);
 
       this.syncServerStatus = 'offline';
+
       this.syncServerMessage = 'Home sync server is not reachable from this device.';
     }
   }
 
   async registerSyncDevice(): Promise<void> {
     const name = this.deviceName.trim();
+
     const secret = this.enrollmentSecret.trim();
 
     this.syncRegistrationMessage = '';
+
     this.syncRegistrationError = '';
 
     if (!this.deviceId) {
       this.syncRegistrationError = 'Device ID is not ready yet.';
+
       return;
     }
 
     if (!name) {
       this.syncRegistrationError = 'Please enter a device name.';
+
       return;
     }
 
     if (!secret) {
       this.syncRegistrationError = 'Please enter the enrollment secret.';
+
       return;
     }
 
@@ -192,8 +227,11 @@ export class AppComponent {
 
       const auth: StoredDeviceAuth = {
         deviceId: result.device.id,
+
         deviceName: result.device.name,
+
         token: result.token,
+
         registeredAt,
       };
 
@@ -201,7 +239,9 @@ export class AppComponent {
 
       await this.syncStorage.saveDeviceIdentity({
         deviceId: result.device.id,
+
         deviceName: result.device.name,
+
         createdAt: registeredAt,
       });
 
@@ -216,6 +256,7 @@ export class AppComponent {
       this.enrollmentSecret = '';
 
       this.syncServerStatus = 'online';
+
       this.syncServerMessage = 'Home sync server is reachable.';
 
       this.syncRegistrationMessage = rotatingToken
@@ -236,7 +277,7 @@ export class AppComponent {
         return 'Registration failed: the enrollment secret was rejected.';
       }
 
-      return `${error.message} (HTTP ${error.status})`;
+      return `${error.message} ` + `(HTTP ${error.status})`;
     }
 
     if (error instanceof Error) {
@@ -270,6 +311,10 @@ export class AppComponent {
     return 'Flashcards device';
   }
 
+  // -------------------------------------------------
+  // Current deck / practice card
+  // -------------------------------------------------
+
   get selectedDeck(): Deck | undefined {
     if (!this.selectedDeckId) {
       return undefined;
@@ -289,6 +334,10 @@ export class AppComponent {
 
     return this.practiceCards[this.practiceIndex];
   }
+
+  // -------------------------------------------------
+  // Decks
+  // -------------------------------------------------
 
   reloadDecks(): void {
     this.decks = this.state.getDecks();
@@ -316,6 +365,7 @@ export class AppComponent {
 
   selectDeck(deck: Deck): void {
     this.selectedDeckId = deck.id;
+
     this.deckViewMode = 'menu';
 
     this.exitPracticeMode();
@@ -336,6 +386,7 @@ export class AppComponent {
     }
 
     this.deckViewMode = 'edit';
+
     this.exitPracticeMode();
   }
 
@@ -345,16 +396,19 @@ export class AppComponent {
     }
 
     this.deckViewMode = 'practice';
+
     this.exitPracticeMode();
   }
 
   backToDeckMenu(): void {
     if (!this.selectedDeck) {
       this.backToDeckList();
+
       return;
     }
 
     this.exitPracticeMode();
+
     this.deckViewMode = 'menu';
   }
 
@@ -368,6 +422,10 @@ export class AppComponent {
     this.reloadDecks();
     this.backToDeckList();
   }
+
+  // -------------------------------------------------
+  // Backup / restore
+  // -------------------------------------------------
 
   exportData(): void {
     try {
@@ -437,6 +495,7 @@ export class AppComponent {
         this.reloadDecks();
 
         this.selectedDeckId = null;
+
         this.deckViewMode = null;
 
         this.exitPracticeMode();
@@ -455,6 +514,10 @@ export class AppComponent {
     input.value = '';
   }
 
+  // -------------------------------------------------
+  // Cards
+  // -------------------------------------------------
+
   startCreateCard(): void {
     this.resetCardForm();
   }
@@ -464,11 +527,15 @@ export class AppComponent {
 
     this.cardForm.frontText = card.front.text;
 
-    this.cardForm.frontImageDataUrls = [...(card.front.imageDataUrls || [])];
+    this.cardForm.frontImages = card.front.images.map((image) => ({
+      ...image,
+    }));
 
     this.cardForm.backText = card.back.text;
 
-    this.cardForm.backImageDataUrls = [...(card.back.imageDataUrls || [])];
+    this.cardForm.backImages = card.back.images.map((image) => ({
+      ...image,
+    }));
   }
 
   saveCard(): void {
@@ -481,21 +548,20 @@ export class AppComponent {
     const front: CardSideContent = {
       text: (this.cardForm.frontText || '').trim(),
 
-      imageDataUrls: [...this.cardForm.frontImageDataUrls],
+      images: this.cardForm.frontImages.map((image) => ({
+        ...image,
+      })),
     };
 
     const back: CardSideContent = {
       text: (this.cardForm.backText || '').trim(),
 
-      imageDataUrls: [...this.cardForm.backImageDataUrls],
+      images: this.cardForm.backImages.map((image) => ({
+        ...image,
+      })),
     };
 
-    if (
-      !front.text &&
-      front.imageDataUrls.length === 0 &&
-      !back.text &&
-      back.imageDataUrls.length === 0
-    ) {
+    if (!front.text && front.images.length === 0 && !back.text && back.images.length === 0) {
       return;
     }
 
@@ -534,41 +600,57 @@ export class AppComponent {
     this.cardForm = {
       editingCardId: null,
       frontText: '',
-      frontImageDataUrls: [],
+      frontImages: [],
       backText: '',
-      backImageDataUrls: [],
+      backImages: [],
     };
   }
 
+  // -------------------------------------------------
+  // Images
+  // -------------------------------------------------
+
   onFrontImageSelected(event: Event): void {
     this.loadImageFromEvent(event, (dataUrl) => {
-      this.cardForm.frontImageDataUrls = [...this.cardForm.frontImageDataUrls, dataUrl];
+      const image: CardImageContent = {
+        id: this.generateImageId(),
+
+        dataUrl,
+      };
+
+      this.cardForm.frontImages = [...this.cardForm.frontImages, image];
     });
   }
 
   clearFrontImages(): void {
-    this.cardForm.frontImageDataUrls = [];
+    this.cardForm.frontImages = [];
   }
 
   removeFrontImage(index: number): void {
-    this.cardForm.frontImageDataUrls = this.cardForm.frontImageDataUrls.filter(
-      (_img, i) => i !== index,
+    this.cardForm.frontImages = this.cardForm.frontImages.filter(
+      (_image, currentIndex) => currentIndex !== index,
     );
   }
 
   onBackImageSelected(event: Event): void {
     this.loadImageFromEvent(event, (dataUrl) => {
-      this.cardForm.backImageDataUrls = [...this.cardForm.backImageDataUrls, dataUrl];
+      const image: CardImageContent = {
+        id: this.generateImageId(),
+
+        dataUrl,
+      };
+
+      this.cardForm.backImages = [...this.cardForm.backImages, image];
     });
   }
 
   clearBackImages(): void {
-    this.cardForm.backImageDataUrls = [];
+    this.cardForm.backImages = [];
   }
 
   removeBackImage(index: number): void {
-    this.cardForm.backImageDataUrls = this.cardForm.backImageDataUrls.filter(
-      (_img, i) => i !== index,
+    this.cardForm.backImages = this.cardForm.backImages.filter(
+      (_image, currentIndex) => currentIndex !== index,
     );
   }
 
@@ -596,6 +678,37 @@ export class AppComponent {
     input.value = '';
   }
 
+  private generateImageId(): string {
+    if (
+      typeof globalThis.crypto !== 'undefined' &&
+      typeof globalThis.crypto.randomUUID === 'function'
+    ) {
+      return globalThis.crypto.randomUUID();
+    }
+
+    if (
+      typeof globalThis.crypto !== 'undefined' &&
+      typeof globalThis.crypto.getRandomValues === 'function'
+    ) {
+      const bytes = new Uint8Array(16);
+
+      globalThis.crypto.getRandomValues(bytes);
+
+      return (
+        'img-' +
+        Array.from(bytes)
+          .map((value) => value.toString(16).padStart(2, '0'))
+          .join('')
+      );
+    }
+
+    return 'img-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+  }
+
+  // -------------------------------------------------
+  // Practice
+  // -------------------------------------------------
+
   startPractice(): void {
     const deck = this.selectedDeck;
 
@@ -606,11 +719,7 @@ export class AppComponent {
     let pool: Flashcard[] = deck.cards;
 
     if (this.practiceDifficultyFilter === 'unrated') {
-      pool = deck.cards.filter((card) => {
-        const updated = card.updatedAt ?? card.createdAt;
-
-        return updated === card.createdAt;
-      });
+      pool = deck.cards.filter((card) => card.lastReviewedAt === null);
     } else if (this.practiceDifficultyFilter !== 'all') {
       const target = this.practiceDifficultyFilter as DifficultyLevel;
 
@@ -677,6 +786,7 @@ export class AppComponent {
   private nextPracticeCard(): void {
     if (this.practiceIndex + 1 >= this.practiceCards.length) {
       this.practiceFinished = true;
+
       this.isPracticeMode = false;
 
       return;
@@ -691,11 +801,7 @@ export class AppComponent {
   }
 
   getUnratedCount(deck: Deck): number {
-    return deck.cards.filter((card) => {
-      const updated = card.updatedAt ?? card.createdAt;
-
-      return updated === card.createdAt;
-    }).length;
+    return deck.cards.filter((card) => card.lastReviewedAt === null).length;
   }
 
   getDifficultyCount(deck: Deck, level: number): number {
@@ -705,12 +811,13 @@ export class AppComponent {
   private shuffle<T>(items: T[]): T[] {
     const arr = [...items];
 
-    for (let i = arr.length - 1; i > 0; i--) {
+    for (let i = arr.length - 1; i > 0; i -= 1) {
       const j = Math.floor(Math.random() * (i + 1));
 
       const tmp = arr[i];
 
       arr[i] = arr[j];
+
       arr[j] = tmp;
     }
 

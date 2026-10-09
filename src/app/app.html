@@ -72,6 +72,7 @@
           <strong>
             {{ isDeviceRegistered ? 'Registered' : 'Not registered' }}
           </strong>
+
           <span *ngIf="isDeviceRegistered"> as {{ registeredDeviceName }}. </span>
         </p>
 
@@ -285,13 +286,13 @@
                   </span>
                 </label>
 
-                <div class="image-preview" *ngIf="cardForm.frontImageDataUrls.length > 0">
+                <div class="image-preview" *ngIf="cardForm.frontImages.length > 0">
                   <div class="image-preview-grid">
                     <div
                       class="image-preview-item"
-                      *ngFor="let img of cardForm.frontImageDataUrls; let i = index"
+                      *ngFor="let image of cardForm.frontImages; let i = index"
                     >
-                      <img [src]="img" [alt]="'Front side image ' + (i + 1)" />
+                      <img [src]="image.dataUrl" [alt]="'Front side image ' + (i + 1)" />
 
                       <button type="button" class="secondary" (click)="removeFrontImage(i)">
                         Remove
@@ -329,13 +330,13 @@
                   </span>
                 </label>
 
-                <div class="image-preview" *ngIf="cardForm.backImageDataUrls.length > 0">
+                <div class="image-preview" *ngIf="cardForm.backImages.length > 0">
                   <div class="image-preview-grid">
                     <div
                       class="image-preview-item"
-                      *ngFor="let img of cardForm.backImageDataUrls; let i = index"
+                      *ngFor="let image of cardForm.backImages; let i = index"
                     >
-                      <img [src]="img" [alt]="'Back side image ' + (i + 1)" />
+                      <img [src]="image.dataUrl" [alt]="'Back side image ' + (i + 1)" />
 
                       <button type="button" class="secondary" (click)="removeBackImage(i)">
                         Remove
@@ -393,11 +394,11 @@
                         {{ card.front.text }}
                       </div>
 
-                      <div class="card-image-thumb" *ngIf="card.front.imageDataUrls?.length">
-                        <img [src]="card.front.imageDataUrls[0]" alt="Front side image" />
+                      <div class="card-image-thumb" *ngIf="card.front.images.length">
+                        <img [src]="card.front.images[0].dataUrl" alt="Front side image" />
 
-                        <span class="thumb-counter" *ngIf="card.front.imageDataUrls.length > 1">
-                          +{{ card.front.imageDataUrls.length - 1 }}
+                        <span class="thumb-counter" *ngIf="card.front.images.length > 1">
+                          +{{ card.front.images.length - 1 }}
                         </span>
                       </div>
                     </div>
@@ -409,11 +410,11 @@
                         {{ card.back.text }}
                       </div>
 
-                      <div class="card-image-thumb" *ngIf="card.back.imageDataUrls?.length">
-                        <img [src]="card.back.imageDataUrls[0]" alt="Back side image" />
+                      <div class="card-image-thumb" *ngIf="card.back.images.length">
+                        <img [src]="card.back.images[0].dataUrl" alt="Back side image" />
 
-                        <span class="thumb-counter" *ngIf="card.back.imageDataUrls.length > 1">
-                          +{{ card.back.imageDataUrls.length - 1 }}
+                        <span class="thumb-counter" *ngIf="card.back.images.length > 1">
+                          +{{ card.back.images.length - 1 }}
                         </span>
                       </div>
                     </div>
@@ -526,23 +527,20 @@
                 }}
               </p>
 
-              <div
-                class="practice-images"
-                *ngIf="!showBackSide && card.front.imageDataUrls?.length"
-              >
+              <div class="practice-images" *ngIf="!showBackSide && card.front.images.length">
                 <img
-                  *ngFor="let img of card.front.imageDataUrls"
+                  *ngFor="let image of card.front.images"
                   class="practice-image"
-                  [src]="img"
+                  [src]="image.dataUrl"
                   alt="Front side image"
                 />
               </div>
 
-              <div class="practice-images" *ngIf="showBackSide && card.back.imageDataUrls?.length">
+              <div class="practice-images" *ngIf="showBackSide && card.back.images.length">
                 <img
-                  *ngFor="let img of card.back.imageDataUrls"
+                  *ngFor="let image of card.back.images"
                   class="practice-image"
-                  [src]="img"
+                  [src]="image.dataUrl"
                   alt="Back side image"
                 />
               </div>

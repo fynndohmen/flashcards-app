@@ -1,83 +1,66 @@
 // src/app/models.ts
 
-// Difficulty 1–10 as its own type
-export type DifficultyLevel =
-  | 1
-  | 2
-  | 3
-  | 4
-  | 5
-  | 6
-  | 7
-  | 8
-  | 9
-  | 10;
+export type DifficultyLevel = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 
-// Helper array for loops in the UI (buttons 1–10 etc.)
-export const ALL_DIFFICULTY_LEVELS: DifficultyLevel[] = [
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-];
+export const ALL_DIFFICULTY_LEVELS: DifficultyLevel[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 /**
- * Content of a single card side (front or back).
+ * One locally stored image belonging to a card side.
  *
- * - text: text on this side
- * - imageDataUrls: zero or more images, stored as data URLs
+ * The ID is stable and independent from its position in the array.
+ * This is important for multi-device sync.
+ */
+export interface CardImageContent {
+  id: string;
+  dataUrl: string;
+}
+
+/**
+ * Content of one side of a flashcard.
  */
 export interface CardSideContent {
-  /** Text on this side of the card. */
   text: string;
-
-  /**
-   * Optional images on this side of the card.
-   * We store them as Data-URLs (e.g. "data:image/png;base64,..."),
-   * so everything can be saved locally (localStorage / export).
-   */
-  imageDataUrls: string[];
+  images: CardImageContent[];
 }
 
-// A single flashcard
+/**
+ * A single flashcard.
+ */
 export interface Flashcard {
-  /** Unique ID of the card. */
   id: string;
 
-  /** Front side of the card (text + images). */
   front: CardSideContent;
-
-  /** Back side of the card (text + images). */
   back: CardSideContent;
 
-  /**
-   * Difficulty 1 (very easy) to 10 (very hard).
-   * After each review we assign the card to one of these "sub-stacks".
-   */
   difficulty: DifficultyLevel;
 
-  /** Creation timestamp as ISO string, e.g. new Date().toISOString(). */
   createdAt: string;
+  updatedAt: string;
 
-  /** Optional: last modification timestamp. */
-  updatedAt?: string;
+  /**
+   * null:
+   *   This card has never been rated/reviewed.
+   *
+   * ISO timestamp:
+   *   Last time the card received a difficulty rating.
+   *
+   * Normal text/image edits do not change this field.
+   */
+  lastReviewedAt: string | null;
 }
 
-// A deck (stack) of flashcards
+/**
+ * A deck of flashcards.
+ */
 export interface Deck {
-  /** Unique ID of the deck. */
   id: string;
-
-  /** Name of the deck, e.g. "Spanish – Verbs". */
   name: string;
-
-  /** Optional description shown in the overview. */
   description?: string;
-
-  /** All cards in this deck. */
   cards: Flashcard[];
 }
 
 /**
- * Global app state.
- * We store this structure 1:1 in localStorage / export backups.
+ * Global user-visible application state.
  */
 export interface FlashcardsState {
   decks: Deck[];
