@@ -35,6 +35,8 @@ export type BootstrapMode =
   | 'resume-local-upload'
   | 'blocked-mixed';
 
+export type BootstrapExecutionStatus = 'initialized-empty' | 'already-initialized';
+
 export interface BootstrapAssessment {
   mode: BootstrapMode;
 
@@ -49,6 +51,24 @@ export interface BootstrapAssessment {
   serverHasActiveData: boolean;
 
   resumableUploadDetected: boolean;
+}
+
+export interface BootstrapExecutionResult {
+  status: BootstrapExecutionStatus;
+
+  mode: BootstrapMode;
+
+  initialized: boolean;
+
+  serverRevision: number;
+
+  lastSuccessfulSyncAt: string | null;
+
+  changedLocalMetadata: boolean;
+
+  changedLocalState: false;
+
+  changedServerData: false;
 }
 
 export interface PullPreviewItem {
@@ -164,6 +184,169 @@ export class SyncEngineService {
     this.validatePullResponse(response, since);
 
     return this.buildPreviewReport(localState, meta, response, since);
+  }
+
+  /**
+   * First deliberately write-capable bootstrap entry point.
+   *
+   * For now ONLY the safest possible bootstrap mode is
+   * implemented:
+   *
+   *   local empty + server empty
+   *
+   * The only mutation is:
+   *
+   *   initialized = true
+   *   serverRevision = 0
+   *   lastSuccessfulSyncAt = now
+   *
+   * No local flashcards are changed and no server mutation
+   * endpoint is called.
+   *
+   * All other bootstrap modes deliberately abort until their
+   * individual implementations have been added and tested.
+   */
+  async bootstrap(): Promise<BootstrapExecutionResult> {
+    const report = await this.previewPull();
+
+    if (report.bootstrap.mode === 'already-initialized') {
+      const meta = await this.syncStorage.getSyncMeta();
+
+      return {
+        status: 'already-initialized',
+
+        mode: 'already-initialized',
+
+        initialized: meta.initialized,
+
+        serverRevision: meta.serverRevision,
+
+        lastSuccessfulSyncAt: meta.lastSuccessfulSyncAt,
+
+        changedLocalMetadata: false,
+
+        changedLocalState: false,
+
+        changedServerData: false,
+      };
+    }
+
+    if (report.bootstrap.mode !== 'initialize-empty') {
+      throw new Error(
+        `Bootstrap mode "${report.bootstrap.mode}" is not implemented yet. No local or server data was changed.`,
+      );
+    }
+
+    /*
+     * Defensive re-check immediately before writing.
+     *
+     * The preview already established these conditions, but
+     * the bootstrap write should never rely solely on an
+     * earlier observation.
+     */
+    const currentState = this.state.getState();
+
+    if (this.localStateHasData(currentState)) {
+      throw new Error(
+        'Empty bootstrap aborted because local flashcard data appeared after the preview. No sync metadata was changed.',
+      );
+    }
+
+    if (
+      report.serverRevision !== 0 ||
+      report.remote.decks !== 0 ||
+      report.remote.cards !== 0 ||
+      report.remote.images !== 0
+    ) {
+      throw new Error(
+        'Empty bootstrap aborted because the server is not empty. No sync metadata was changed.',
+      );
+    }
+
+    const completedAt = new Date().toISOString();
+
+    let changed = false;
+
+    const updatedMeta = await this.syncStorage.updateSyncMeta((meta) => {
+      /*
+       * A concurrent bootstrap may have completed while
+       * we were waiting on the metadata queue. In that
+       * case this operation becomes an idempotent no-op.
+       */
+      if (meta.initialized) {
+        return;
+      }
+
+      if (meta.serverRevision !== 0) {
+        throw new Error(
+          `Empty bootstrap expected local serverRevision 0, found ${meta.serverRevision}.`,
+        );
+      }
+
+      if (this.syncMetaHasEntityRecords(meta)) {
+        throw new Error(
+          'Empty bootstrap found existing entity sync metadata. Refusing to mark this client initialized automatically.',
+        );
+      }
+
+      meta.initialized = true;
+
+      meta.serverRevision = 0;
+
+      meta.lastSuccessfulSyncAt = completedAt;
+
+      changed = true;
+    });
+
+    return {
+      status: changed ? 'initialized-empty' : 'already-initialized',
+
+      mode: changed ? 'initialize-empty' : 'already-initialized',
+
+      initialized: updatedMeta.initialized,
+
+      serverRevision: updatedMeta.serverRevision,
+
+      lastSuccessfulSyncAt: updatedMeta.lastSuccessfulSyncAt,
+
+      changedLocalMetadata: changed,
+
+      changedLocalState: false,
+
+      changedServerData: false,
+    };
+  }
+
+  /**
+   * Development helper that runs bootstrap and logs a
+   * token-free summary.
+   */
+  async bootstrapAndLog(): Promise<BootstrapExecutionResult> {
+    const result = await this.bootstrap();
+
+    console.group('Flashcards sync bootstrap');
+
+    console.log({
+      status: result.status,
+
+      mode: result.mode,
+
+      initialized: result.initialized,
+
+      serverRevision: result.serverRevision,
+
+      lastSuccessfulSyncAt: result.lastSuccessfulSyncAt,
+
+      changedLocalMetadata: result.changedLocalMetadata,
+
+      changedLocalState: result.changedLocalState,
+
+      changedServerData: result.changedServerData,
+    });
+
+    console.groupEnd();
+
+    return result;
   }
 
   /**
@@ -494,11 +677,15 @@ export class SyncEngineService {
   }
 
   private localStateHasData(localState: ReturnType<FlashcardsStateService['getState']>): boolean {
-    if (localState.decks.length > 0) {
-      return true;
-    }
+    return localState.decks.length > 0;
+  }
 
-    return false;
+  private syncMetaHasEntityRecords(meta: StoredSyncMeta): boolean {
+    return (
+      Object.keys(meta.decks).length > 0 ||
+      Object.keys(meta.cards).length > 0 ||
+      Object.keys(meta.images).length > 0
+    );
   }
 
   private isResumableLocalBootstrap(
@@ -570,11 +757,6 @@ export class SyncEngineService {
       }
     }
 
-    /*
-     * Every local entity must already have bootstrap
-     * metadata. This is what distinguishes a deliberate,
-     * resumable bootstrap from arbitrary mixed data.
-     */
     for (const deck of localState.decks) {
       if (!this.isSafeBootstrapRecord(meta.decks[deck.id])) {
         return false;
@@ -599,11 +781,6 @@ export class SyncEngineService {
       }
     }
 
-    /*
-     * Every remote entity must exist locally and must
-     * exactly match a clean server revision that this
-     * client already acknowledged.
-     */
     for (const deck of response.decks) {
       const local = localDecks.get(deck.id);
 
@@ -692,10 +869,6 @@ export class SyncEngineService {
       }
     }
 
-    /*
-     * There must be at least one acknowledged remote
-     * entity; otherwise this is not a resume situation.
-     */
     return response.decks.length > 0 || response.cards.length > 0 || response.images.length > 0;
   }
 
