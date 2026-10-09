@@ -3,18 +3,19 @@
 import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import {
-  CardSideContent,
-  Deck,
-  DifficultyLevel,
-  Flashcard,
-  FlashcardsState,
-} from './models';
+
+import { CardSideContent, Deck, DifficultyLevel, Flashcard, FlashcardsState } from './models';
+
 import { FlashcardsStateService } from './flashcards-state.service';
+import { SyncApiError, SyncApiService } from './sync-api.service';
+
+import { StoredDeviceAuth, SyncStorageService } from './sync-storage.service';
 
 type DeckViewMode = 'menu' | 'edit' | 'practice' | null;
-// allow number so template assignments like "practiceDifficultyFilter = level" are valid
+
 type PracticeDifficultyFilter = 'all' | 'unrated' | number;
+
+type SyncServerStatus = 'checking' | 'online' | 'offline';
 
 @Component({
   selector: 'app-root',
@@ -24,24 +25,17 @@ type PracticeDifficultyFilter = 'all' | 'unrated' | number;
   styleUrl: './app.scss',
 })
 export class AppComponent {
-  // App title (not heavily used, but we keep it)
   title = 'flashcards-app';
 
-  // App is loaded from IndexedDB asynchronously
   isAppReady = false;
 
-  // -----------------------------
-  // Overall state for the UI
-  // -----------------------------
   decks: Deck[] = [];
   selectedDeckId: string | null = null;
-  deckViewMode: DeckViewMode = null; // 'menu' | 'edit' | 'practice'
+  deckViewMode: DeckViewMode = null;
 
-  // Form for new deck
   newDeckName = '';
   newDeckDescription = '';
 
-  // Form for card (create or edit)
   cardForm = {
     editingCardId: null as string | null,
     frontText: '',
@@ -50,57 +44,256 @@ export class AppComponent {
     backImageDataUrls: [] as string[],
   };
 
-  // Practice mode
   isPracticeMode = false;
   showBackSide = false;
   practiceCards: Flashcard[] = [];
   practiceIndex = 0;
   practiceFinished = false;
 
-  // Practice difficulty filter: 'all', 'unrated', or a specific level 1–10
   practiceDifficultyFilter: PracticeDifficultyFilter = 'all';
 
-  constructor(private state: FlashcardsStateService) {
+  syncServerStatus: SyncServerStatus = 'checking';
+
+  syncServerMessage = 'Checking home sync server...';
+
+  deviceId = '';
+  deviceName = '';
+  enrollmentSecret = '';
+
+  isDeviceRegistered = false;
+  registeredDeviceName = '';
+
+  isRegisteringDevice = false;
+
+  syncRegistrationMessage = '';
+  syncRegistrationError = '';
+
+  constructor(
+    private state: FlashcardsStateService,
+    private syncApi: SyncApiService,
+    private syncStorage: SyncStorageService,
+  ) {
     void this.initializeApp();
   }
 
   private async initializeApp(): Promise<void> {
     try {
       await this.state.whenReady();
+
       this.reloadDecks();
-      this.isAppReady = true;
     } catch (err) {
       console.error('Failed to initialize app', err);
+
       alert('The app could not load saved data. Please check the console for details.');
-      this.isAppReady = true;
+    }
+
+    this.isAppReady = true;
+
+    void this.initializeSyncEnrollment();
+  }
+
+  private async initializeSyncEnrollment(): Promise<void> {
+    try {
+      const storedAuth = await this.syncStorage.getDeviceAuth();
+
+      if (storedAuth && storedAuth.deviceId && storedAuth.deviceName && storedAuth.token) {
+        this.deviceId = storedAuth.deviceId;
+
+        this.deviceName = storedAuth.deviceName;
+
+        this.registeredDeviceName = storedAuth.deviceName;
+
+        this.isDeviceRegistered = true;
+
+        await this.syncStorage.saveDeviceIdentity({
+          deviceId: storedAuth.deviceId,
+          deviceName: storedAuth.deviceName,
+          createdAt: storedAuth.registeredAt || new Date().toISOString(),
+        });
+      } else {
+        const identity = await this.syncStorage.getOrCreateDeviceIdentity(this.guessDeviceName());
+
+        this.deviceId = identity.deviceId;
+
+        this.deviceName = identity.deviceName;
+      }
+    } catch (err) {
+      console.error('Failed to initialize sync device identity', err);
+
+      this.syncRegistrationError = 'Could not load the local sync device identity.';
+    }
+
+    await this.checkSyncServer();
+  }
+
+  async checkSyncServer(): Promise<void> {
+    this.syncServerStatus = 'checking';
+    this.syncServerMessage = 'Checking home sync server...';
+
+    try {
+      const health = await this.syncApi.health();
+
+      if (health.status === 'ok' && health.database === 'ok') {
+        this.syncServerStatus = 'online';
+        this.syncServerMessage = 'Home sync server is reachable.';
+        return;
+      }
+
+      this.syncServerStatus = 'offline';
+      this.syncServerMessage = 'Home sync server responded, but is not healthy.';
+    } catch (err) {
+      console.error('Sync server health check failed', err);
+
+      this.syncServerStatus = 'offline';
+      this.syncServerMessage = 'Home sync server is not reachable from this device.';
     }
   }
 
-  // Currently selected deck
-  get selectedDeck(): Deck | undefined {
-    if (!this.selectedDeckId) return undefined;
-    return this.decks.find((d) => d.id === this.selectedDeckId);
+  async registerSyncDevice(): Promise<void> {
+    const name = this.deviceName.trim();
+    const secret = this.enrollmentSecret.trim();
+
+    this.syncRegistrationMessage = '';
+    this.syncRegistrationError = '';
+
+    if (!this.deviceId) {
+      this.syncRegistrationError = 'Device ID is not ready yet.';
+      return;
+    }
+
+    if (!name) {
+      this.syncRegistrationError = 'Please enter a device name.';
+      return;
+    }
+
+    if (!secret) {
+      this.syncRegistrationError = 'Please enter the enrollment secret.';
+      return;
+    }
+
+    const rotatingToken = this.isDeviceRegistered;
+
+    if (rotatingToken) {
+      const confirmed = confirm(
+        'This device is already registered. Re-registering it will rotate the device token and invalidate the previous token for this device. Continue?',
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    this.isRegisteringDevice = true;
+
+    try {
+      const result = await this.syncApi.registerDevice(this.deviceId, name, secret);
+
+      const registeredAt = new Date().toISOString();
+
+      const auth: StoredDeviceAuth = {
+        deviceId: result.device.id,
+        deviceName: result.device.name,
+        token: result.token,
+        registeredAt,
+      };
+
+      await this.syncStorage.saveDeviceAuth(auth);
+
+      await this.syncStorage.saveDeviceIdentity({
+        deviceId: result.device.id,
+        deviceName: result.device.name,
+        createdAt: registeredAt,
+      });
+
+      this.deviceId = result.device.id;
+
+      this.deviceName = result.device.name;
+
+      this.registeredDeviceName = result.device.name;
+
+      this.isDeviceRegistered = true;
+
+      this.enrollmentSecret = '';
+
+      this.syncServerStatus = 'online';
+      this.syncServerMessage = 'Home sync server is reachable.';
+
+      this.syncRegistrationMessage = rotatingToken
+        ? 'Device re-registered successfully. The device token was rotated.'
+        : 'Device registered successfully.';
+    } catch (err) {
+      console.error('Device registration failed', err);
+
+      this.syncRegistrationError = this.describeSyncError(err);
+    } finally {
+      this.isRegisteringDevice = false;
+    }
   }
 
-  // Current card in practice mode
+  private describeSyncError(error: unknown): string {
+    if (error instanceof SyncApiError) {
+      if (error.status === 401) {
+        return 'Registration failed: the enrollment secret was rejected.';
+      }
+
+      return `${error.message} (HTTP ${error.status})`;
+    }
+
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    return 'Unknown sync error.';
+  }
+
+  private guessDeviceName(): string {
+    const platform = navigator.platform || '';
+
+    const userAgent = navigator.userAgent || '';
+
+    if (/iPad/i.test(userAgent) || (platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+      return 'iPad';
+    }
+
+    if (/Mac/i.test(platform)) {
+      return 'MacBook';
+    }
+
+    if (/Linux/i.test(platform)) {
+      return 'Linux device';
+    }
+
+    if (/Win/i.test(platform)) {
+      return 'Windows device';
+    }
+
+    return 'Flashcards device';
+  }
+
+  get selectedDeck(): Deck | undefined {
+    if (!this.selectedDeckId) {
+      return undefined;
+    }
+
+    return this.decks.find((deck) => deck.id === this.selectedDeckId);
+  }
+
   get currentPracticeCard(): Flashcard | undefined {
-    if (!this.isPracticeMode) return undefined;
+    if (!this.isPracticeMode) {
+      return undefined;
+    }
+
     if (this.practiceIndex < 0 || this.practiceIndex >= this.practiceCards.length) {
       return undefined;
     }
+
     return this.practiceCards[this.practiceIndex];
   }
 
-  // -----------------------------
-  // Deck management
-  // -----------------------------
-
   reloadDecks(): void {
     this.decks = this.state.getDecks();
-    if (
-      this.selectedDeckId &&
-      !this.decks.some((d) => d.id === this.selectedDeckId)
-    ) {
+
+    if (this.selectedDeckId && !this.decks.some((deck) => deck.id === this.selectedDeckId)) {
       this.selectedDeckId = null;
       this.deckViewMode = null;
     }
@@ -108,19 +301,23 @@ export class AppComponent {
 
   createDeck(): void {
     const name = this.newDeckName.trim();
+
     if (!name) {
       return;
     }
 
     this.state.createDeck(name, this.newDeckDescription);
+
     this.newDeckName = '';
     this.newDeckDescription = '';
+
     this.reloadDecks();
   }
 
   selectDeck(deck: Deck): void {
     this.selectedDeckId = deck.id;
-    this.deckViewMode = 'menu'; // show mode selection first
+    this.deckViewMode = 'menu';
+
     this.exitPracticeMode();
     this.resetCardForm();
   }
@@ -128,18 +325,25 @@ export class AppComponent {
   backToDeckList(): void {
     this.selectedDeckId = null;
     this.deckViewMode = null;
+
     this.exitPracticeMode();
     this.resetCardForm();
   }
 
   goToEditMode(): void {
-    if (!this.selectedDeck) return;
+    if (!this.selectedDeck) {
+      return;
+    }
+
     this.deckViewMode = 'edit';
     this.exitPracticeMode();
   }
 
   goToPracticeMode(): void {
-    if (!this.selectedDeck) return;
+    if (!this.selectedDeck) {
+      return;
+    }
+
     this.deckViewMode = 'practice';
     this.exitPracticeMode();
   }
@@ -149,6 +353,7 @@ export class AppComponent {
       this.backToDeckList();
       return;
     }
+
     this.exitPracticeMode();
     this.deckViewMode = 'menu';
   }
@@ -157,51 +362,62 @@ export class AppComponent {
     if (!confirm(`Really delete deck "${deck.name}"?`)) {
       return;
     }
+
     this.state.deleteDeck(deck.id);
+
     this.reloadDecks();
     this.backToDeckList();
   }
 
-  // -----------------------------
-  // Export / Import
-  // -----------------------------
-
-  /** Download current state as JSON file. */
   exportData(): void {
     try {
       const state = this.state.exportState();
+
       const json = JSON.stringify(state, null, 2);
-      const blob = new Blob([json], { type: 'application/json' });
+
+      const blob = new Blob([json], {
+        type: 'application/json',
+      });
+
       const url = URL.createObjectURL(blob);
+
       const a = document.createElement('a');
+
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
       a.href = url;
+
       a.download = `flashcards-backup-${timestamp}.json`;
+
       document.body.appendChild(a);
+
       a.click();
+
       document.body.removeChild(a);
+
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Export failed', err);
+
       alert('Export failed. Please check the console for details.');
     }
   }
 
-  /**
-   * Handle selection of a JSON file and import its contents.
-   * Bound to a hidden <input type="file"> in the template.
-   */
   importDataFromFile(event: Event): void {
     const input = event.target as HTMLInputElement;
+
     if (!input.files || input.files.length === 0) {
       return;
     }
+
     const file = input.files[0];
 
     const reader = new FileReader();
+
     reader.onload = async () => {
       try {
         const text = reader.result;
+
         if (typeof text !== 'string') {
           throw new Error('Unexpected file content');
         }
@@ -209,37 +425,35 @@ export class AppComponent {
         const parsed = JSON.parse(text) as FlashcardsState;
 
         const ok = confirm(
-          'Importing this backup will replace all decks and cards on this device. Continue?'
+          'Importing this backup will replace all decks and cards on this device. Continue?',
         );
+
         if (!ok) {
           return;
         }
 
-        // Important: wait until IndexedDB has actually saved the imported state.
         await this.state.importState(parsed);
 
         this.reloadDecks();
+
         this.selectedDeckId = null;
         this.deckViewMode = null;
+
         this.exitPracticeMode();
         this.resetCardForm();
 
         alert('Import successful.');
       } catch (err) {
         console.error('Import failed', err);
+
         alert('Import failed. Please make sure you selected a valid backup file.');
       }
     };
 
     reader.readAsText(file);
 
-    // Allow selecting the same file again later
     input.value = '';
   }
-
-  // -----------------------------
-  // Card management
-  // -----------------------------
 
   startCreateCard(): void {
     this.resetCardForm();
@@ -247,27 +461,35 @@ export class AppComponent {
 
   startEditCard(card: Flashcard): void {
     this.cardForm.editingCardId = card.id;
+
     this.cardForm.frontText = card.front.text;
+
     this.cardForm.frontImageDataUrls = [...(card.front.imageDataUrls || [])];
+
     this.cardForm.backText = card.back.text;
+
     this.cardForm.backImageDataUrls = [...(card.back.imageDataUrls || [])];
   }
 
   saveCard(): void {
     const deck = this.selectedDeck;
-    if (!deck) return;
+
+    if (!deck) {
+      return;
+    }
 
     const front: CardSideContent = {
       text: (this.cardForm.frontText || '').trim(),
+
       imageDataUrls: [...this.cardForm.frontImageDataUrls],
     };
 
     const back: CardSideContent = {
       text: (this.cardForm.backText || '').trim(),
+
       imageDataUrls: [...this.cardForm.backImageDataUrls],
     };
 
-    // Ignore completely empty cards (no text, no images)
     if (
       !front.text &&
       front.imageDataUrls.length === 0 &&
@@ -284,6 +506,7 @@ export class AppComponent {
       });
     } else {
       const defaultDifficulty: DifficultyLevel = 5;
+
       this.state.createCard(deck.id, front, back, defaultDifficulty);
     }
 
@@ -293,13 +516,17 @@ export class AppComponent {
 
   deleteCard(card: Flashcard): void {
     const deck = this.selectedDeck;
-    if (!deck) return;
+
+    if (!deck) {
+      return;
+    }
 
     if (!confirm('Really delete this card?')) {
       return;
     }
 
     this.state.deleteCard(deck.id, card.id);
+
     this.reloadDecks();
   }
 
@@ -313,16 +540,9 @@ export class AppComponent {
     };
   }
 
-  // -----------------------------
-  // Image handling (front/back)
-  // -----------------------------
-
   onFrontImageSelected(event: Event): void {
     this.loadImageFromEvent(event, (dataUrl) => {
-      this.cardForm.frontImageDataUrls = [
-        ...this.cardForm.frontImageDataUrls,
-        dataUrl,
-      ];
+      this.cardForm.frontImageDataUrls = [...this.cardForm.frontImageDataUrls, dataUrl];
     });
   }
 
@@ -332,16 +552,13 @@ export class AppComponent {
 
   removeFrontImage(index: number): void {
     this.cardForm.frontImageDataUrls = this.cardForm.frontImageDataUrls.filter(
-      (_img, i) => i !== index
+      (_img, i) => i !== index,
     );
   }
 
   onBackImageSelected(event: Event): void {
     this.loadImageFromEvent(event, (dataUrl) => {
-      this.cardForm.backImageDataUrls = [
-        ...this.cardForm.backImageDataUrls,
-        dataUrl,
-      ];
+      this.cardForm.backImageDataUrls = [...this.cardForm.backImageDataUrls, dataUrl];
     });
   }
 
@@ -351,66 +568,63 @@ export class AppComponent {
 
   removeBackImage(index: number): void {
     this.cardForm.backImageDataUrls = this.cardForm.backImageDataUrls.filter(
-      (_img, i) => i !== index
+      (_img, i) => i !== index,
     );
   }
 
-  /**
-   * Reads a single image file from a file input and returns the Data URL.
-   * Choose images multiple times to add multiple screenshots.
-   */
-  private loadImageFromEvent(
-    event: Event,
-    onLoaded: (dataUrl: string) => void
-  ): void {
+  private loadImageFromEvent(event: Event, onLoaded: (dataUrl: string) => void): void {
     const input = event.target as HTMLInputElement;
+
     if (!input.files || input.files.length === 0) {
       return;
     }
+
     const file = input.files[0];
+
     const reader = new FileReader();
+
     reader.onload = () => {
       const result = reader.result;
+
       if (typeof result === 'string') {
         onLoaded(result);
       }
     };
+
     reader.readAsDataURL(file);
 
-    // Allow selecting the same file again later
     input.value = '';
   }
 
-  // -----------------------------
-  // Practice mode
-  // -----------------------------
-
   startPractice(): void {
     const deck = this.selectedDeck;
+
     if (!deck || deck.cards.length === 0) {
       return;
     }
 
-    // Build pool based on selected difficulty filter
     let pool: Flashcard[] = deck.cards;
 
     if (this.practiceDifficultyFilter === 'unrated') {
-      // "Unsorted": cards that were never updated after creation.
       pool = deck.cards.filter((card) => {
         const updated = card.updatedAt ?? card.createdAt;
+
         return updated === card.createdAt;
       });
     } else if (this.practiceDifficultyFilter !== 'all') {
       const target = this.practiceDifficultyFilter as DifficultyLevel;
+
       pool = deck.cards.filter((card) => card.difficulty === target);
     }
 
     if (pool.length === 0) {
       alert('No cards match the selected difficulty filter.');
+
       return;
     }
 
     this.practiceCards = this.shuffle([...pool]);
+
     this.practiceIndex = 0;
     this.practiceFinished = false;
     this.isPracticeMode = true;
@@ -426,26 +640,36 @@ export class AppComponent {
   }
 
   flipCard(): void {
-    if (!this.isPracticeMode || !this.currentPracticeCard) return;
+    if (!this.isPracticeMode || !this.currentPracticeCard) {
+      return;
+    }
+
     this.showBackSide = !this.showBackSide;
   }
 
   async rateCurrentCard(level: number): Promise<void> {
     const deck = this.selectedDeck;
+
     const card = this.currentPracticeCard;
-    if (!deck || !card) return;
-    if (level < 1 || level > 10) return;
+
+    if (!deck || !card) {
+      return;
+    }
+
+    if (level < 1 || level > 10) {
+      return;
+    }
 
     const difficulty = level as DifficultyLevel;
 
     try {
-      // Important: wait until IndexedDB has actually saved the difficulty.
       await this.state.setCardDifficulty(deck.id, card.id, difficulty);
 
       this.nextPracticeCard();
       this.reloadDecks();
     } catch (err) {
       console.error('Failed to save difficulty', err);
+
       alert('Could not save the difficulty rating. Please try again.');
     }
   }
@@ -454,46 +678,42 @@ export class AppComponent {
     if (this.practiceIndex + 1 >= this.practiceCards.length) {
       this.practiceFinished = true;
       this.isPracticeMode = false;
+
       return;
     }
+
     this.practiceIndex += 1;
     this.showBackSide = false;
   }
 
-  // -----------------------------
-  // Counts for difficulty chips
-  // -----------------------------
-
-  /** Total cards in the given deck. */
   getTotalCount(deck: Deck): number {
     return deck.cards.length;
   }
 
-  /** Cards that are "unsorted/unrated" (never updated after creation). */
   getUnratedCount(deck: Deck): number {
     return deck.cards.filter((card) => {
       const updated = card.updatedAt ?? card.createdAt;
+
       return updated === card.createdAt;
     }).length;
   }
 
-  /** Cards with a specific difficulty level. */
   getDifficultyCount(deck: Deck, level: number): number {
     return deck.cards.filter((card) => card.difficulty === level).length;
   }
 
-  // -----------------------------
-  // Utils
-  // -----------------------------
-
   private shuffle<T>(items: T[]): T[] {
     const arr = [...items];
+
     for (let i = arr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
+
       const tmp = arr[i];
+
       arr[i] = arr[j];
       arr[j] = tmp;
     }
+
     return arr;
   }
 }

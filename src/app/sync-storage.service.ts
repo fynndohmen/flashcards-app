@@ -4,8 +4,15 @@ const DB_NAME = 'flashcards-app-db';
 const DB_VERSION = 1;
 const STORE_NAME = 'key_value_store';
 
+const DEVICE_IDENTITY_KEY = 'flashcards-device-identity-v1';
 const DEVICE_AUTH_KEY = 'flashcards-device-auth-v1';
 const SYNC_META_KEY = 'flashcards-sync-meta-v1';
+
+export interface StoredDeviceIdentity {
+  deviceId: string;
+  deviceName: string;
+  createdAt: string;
+}
 
 export interface StoredDeviceAuth {
   deviceId: string;
@@ -20,6 +27,34 @@ export interface StoredSyncMeta {
 
 @Injectable({ providedIn: 'root' })
 export class SyncStorageService {
+  async getOrCreateDeviceIdentity(defaultName: string): Promise<StoredDeviceIdentity> {
+    const stored = await this.readValue<StoredDeviceIdentity>(DEVICE_IDENTITY_KEY);
+
+    if (
+      stored &&
+      typeof stored.deviceId === 'string' &&
+      stored.deviceId &&
+      typeof stored.deviceName === 'string' &&
+      stored.deviceName
+    ) {
+      return stored;
+    }
+
+    const identity: StoredDeviceIdentity = {
+      deviceId: this.generateDeviceId(),
+      deviceName: defaultName.trim() || 'Flashcards device',
+      createdAt: new Date().toISOString(),
+    };
+
+    await this.saveDeviceIdentity(identity);
+
+    return identity;
+  }
+
+  async saveDeviceIdentity(identity: StoredDeviceIdentity): Promise<void> {
+    await this.writeValue(DEVICE_IDENTITY_KEY, identity);
+  }
+
   async getDeviceAuth(): Promise<StoredDeviceAuth | null> {
     return this.readValue<StoredDeviceAuth>(DEVICE_AUTH_KEY);
   }
@@ -50,6 +85,35 @@ export class SyncStorageService {
     await this.writeValue(SYNC_META_KEY, {
       serverRevision: Math.max(0, Math.trunc(meta.serverRevision)),
     } satisfies StoredSyncMeta);
+  }
+
+  private generateDeviceId(): string {
+    if (
+      typeof globalThis.crypto !== 'undefined' &&
+      typeof globalThis.crypto.randomUUID === 'function'
+    ) {
+      return globalThis.crypto.randomUUID();
+    }
+
+    if (
+      typeof globalThis.crypto !== 'undefined' &&
+      typeof globalThis.crypto.getRandomValues === 'function'
+    ) {
+      const bytes = new Uint8Array(16);
+
+      globalThis.crypto.getRandomValues(bytes);
+
+      return Array.from(bytes)
+        .map((value) => value.toString(16).padStart(2, '0'))
+        .join('');
+    }
+
+    return (
+      Date.now().toString(36) +
+      '-' +
+      Math.random().toString(36).slice(2) +
+      Math.random().toString(36).slice(2)
+    );
   }
 
   private openDatabase(): Promise<IDBDatabase> {
@@ -99,6 +163,7 @@ export class SyncStorageService {
         const result = request.result as T | undefined;
 
         db.close();
+
         resolve(result ?? null);
       };
     });
