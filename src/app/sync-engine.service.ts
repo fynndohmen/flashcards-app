@@ -4,13 +4,59 @@ import { Injectable } from '@angular/core';
 
 import { ApiCard, ApiCardImage, ApiDeck, PullResponse } from './sync-api.models';
 
-import { SyncApiService } from './sync-api.service';
+import { SyncApiError, SyncApiService } from './sync-api.service';
 
 import { FlashcardsStateService } from './flashcards-state.service';
 
-import { EntitySyncRecord, PendingSyncOperation, StoredSyncMeta } from './sync-metadata.models';
+import {
+  CardSyncSnapshot,
+  DeckSyncSnapshot,
+  EntitySyncRecord,
+  ImageSyncSnapshot,
+  PendingSyncOperation,
+  StoredSyncMeta,
+  SyncImageSide,
+} from './sync-metadata.models';
 
 import { SyncStorageService } from './sync-storage.service';
+
+type LocalState = ReturnType<FlashcardsStateService['getState']>;
+
+type LocalDeck = LocalState['decks'][number];
+
+type LocalCard = LocalDeck['cards'][number];
+
+type LocalImage = LocalCard['front']['images'][number];
+
+interface LocalCardEntry {
+  deckId: string;
+  card: LocalCard;
+}
+
+interface LocalImageEntry {
+  cardId: string;
+  side: SyncImageSide;
+  position: number;
+  image: LocalImage;
+}
+
+interface LocalIndexes {
+  decks: Map<string, LocalDeck>;
+  cards: Map<string, LocalCardEntry>;
+  images: Map<string, LocalImageEntry>;
+}
+
+interface CachedLocalImage {
+  blob: Blob;
+  sha256: string;
+  fileName: string;
+}
+
+interface BootstrapTransferCounts {
+  decks: number;
+  cards: number;
+  images: number;
+}
 
 export type PullPreviewEntityType = 'deck' | 'card' | 'image';
 
@@ -35,7 +81,8 @@ export type BootstrapMode =
   | 'resume-local-upload'
   | 'blocked-mixed';
 
-export type BootstrapExecutionStatus = 'initialized-empty' | 'already-initialized';
+export type BootstrapExecutionStatus =
+  'initialized-empty' | 'uploaded-local' | 'resumed-local-upload' | 'already-initialized';
 
 export interface BootstrapAssessment {
   mode: BootstrapMode;
@@ -64,11 +111,15 @@ export interface BootstrapExecutionResult {
 
   lastSuccessfulSyncAt: string | null;
 
+  uploaded: BootstrapTransferCounts;
+
+  adopted: BootstrapTransferCounts;
+
   changedLocalMetadata: boolean;
 
   changedLocalState: false;
 
-  changedServerData: false;
+  changedServerData: boolean;
 }
 
 export interface PullPreviewItem {
@@ -141,25 +192,10 @@ export class SyncEngineService {
     private state: FlashcardsStateService,
   ) {}
 
-  /**
-   * READ-ONLY sync preview.
-   *
-   * This method:
-   *
-   * - reads local state
-   * - reads sync metadata
-   * - reads stored device auth
-   * - performs GET /api/sync/pull
-   * - analyses what a future sync WOULD do
-   * - classifies the required bootstrap mode
-   *
-   * It deliberately does NOT:
-   *
-   * - modify flashcards-state-v2
-   * - modify flashcards-sync-meta-v1
-   * - download image files
-   * - push anything to the server
-   */
+  // -------------------------------------------------
+  // Read-only preview
+  // -------------------------------------------------
+
   async previewPull(): Promise<PullPreviewReport> {
     await this.state.whenReady();
 
@@ -171,10 +207,6 @@ export class SyncEngineService {
 
     const meta = await this.syncStorage.getSyncMeta();
 
-    /*
-     * An uninitialized client always previews a complete
-     * bootstrap pull from revision 0.
-     */
     const since = meta.initialized ? meta.serverRevision : 0;
 
     const localState = this.state.getState();
@@ -186,175 +218,6 @@ export class SyncEngineService {
     return this.buildPreviewReport(localState, meta, response, since);
   }
 
-  /**
-   * First deliberately write-capable bootstrap entry point.
-   *
-   * For now ONLY the safest possible bootstrap mode is
-   * implemented:
-   *
-   *   local empty + server empty
-   *
-   * The only mutation is:
-   *
-   *   initialized = true
-   *   serverRevision = 0
-   *   lastSuccessfulSyncAt = now
-   *
-   * No local flashcards are changed and no server mutation
-   * endpoint is called.
-   *
-   * All other bootstrap modes deliberately abort until their
-   * individual implementations have been added and tested.
-   */
-  async bootstrap(): Promise<BootstrapExecutionResult> {
-    const report = await this.previewPull();
-
-    if (report.bootstrap.mode === 'already-initialized') {
-      const meta = await this.syncStorage.getSyncMeta();
-
-      return {
-        status: 'already-initialized',
-
-        mode: 'already-initialized',
-
-        initialized: meta.initialized,
-
-        serverRevision: meta.serverRevision,
-
-        lastSuccessfulSyncAt: meta.lastSuccessfulSyncAt,
-
-        changedLocalMetadata: false,
-
-        changedLocalState: false,
-
-        changedServerData: false,
-      };
-    }
-
-    if (report.bootstrap.mode !== 'initialize-empty') {
-      throw new Error(
-        `Bootstrap mode "${report.bootstrap.mode}" is not implemented yet. No local or server data was changed.`,
-      );
-    }
-
-    /*
-     * Defensive re-check immediately before writing.
-     *
-     * The preview already established these conditions, but
-     * the bootstrap write should never rely solely on an
-     * earlier observation.
-     */
-    const currentState = this.state.getState();
-
-    if (this.localStateHasData(currentState)) {
-      throw new Error(
-        'Empty bootstrap aborted because local flashcard data appeared after the preview. No sync metadata was changed.',
-      );
-    }
-
-    if (
-      report.serverRevision !== 0 ||
-      report.remote.decks !== 0 ||
-      report.remote.cards !== 0 ||
-      report.remote.images !== 0
-    ) {
-      throw new Error(
-        'Empty bootstrap aborted because the server is not empty. No sync metadata was changed.',
-      );
-    }
-
-    const completedAt = new Date().toISOString();
-
-    let changed = false;
-
-    const updatedMeta = await this.syncStorage.updateSyncMeta((meta) => {
-      /*
-       * A concurrent bootstrap may have completed while
-       * we were waiting on the metadata queue. In that
-       * case this operation becomes an idempotent no-op.
-       */
-      if (meta.initialized) {
-        return;
-      }
-
-      if (meta.serverRevision !== 0) {
-        throw new Error(
-          `Empty bootstrap expected local serverRevision 0, found ${meta.serverRevision}.`,
-        );
-      }
-
-      if (this.syncMetaHasEntityRecords(meta)) {
-        throw new Error(
-          'Empty bootstrap found existing entity sync metadata. Refusing to mark this client initialized automatically.',
-        );
-      }
-
-      meta.initialized = true;
-
-      meta.serverRevision = 0;
-
-      meta.lastSuccessfulSyncAt = completedAt;
-
-      changed = true;
-    });
-
-    return {
-      status: changed ? 'initialized-empty' : 'already-initialized',
-
-      mode: changed ? 'initialize-empty' : 'already-initialized',
-
-      initialized: updatedMeta.initialized,
-
-      serverRevision: updatedMeta.serverRevision,
-
-      lastSuccessfulSyncAt: updatedMeta.lastSuccessfulSyncAt,
-
-      changedLocalMetadata: changed,
-
-      changedLocalState: false,
-
-      changedServerData: false,
-    };
-  }
-
-  /**
-   * Development helper that runs bootstrap and logs a
-   * token-free summary.
-   */
-  async bootstrapAndLog(): Promise<BootstrapExecutionResult> {
-    const result = await this.bootstrap();
-
-    console.group('Flashcards sync bootstrap');
-
-    console.log({
-      status: result.status,
-
-      mode: result.mode,
-
-      initialized: result.initialized,
-
-      serverRevision: result.serverRevision,
-
-      lastSuccessfulSyncAt: result.lastSuccessfulSyncAt,
-
-      changedLocalMetadata: result.changedLocalMetadata,
-
-      changedLocalState: result.changedLocalState,
-
-      changedServerData: result.changedServerData,
-    });
-
-    console.groupEnd();
-
-    return result;
-  }
-
-  /**
-   * Convenience helper for our current development phase.
-   *
-   * It logs the complete preview without exposing the
-   * device token.
-   */
   async previewPullAndLog(): Promise<PullPreviewReport> {
     const report = await this.previewPull();
 
@@ -415,8 +278,1176 @@ export class SyncEngineService {
     return report;
   }
 
+  // -------------------------------------------------
+  // Bootstrap
+  // -------------------------------------------------
+
+  async bootstrap(): Promise<BootstrapExecutionResult> {
+    const report = await this.previewPull();
+
+    if (report.bootstrap.mode === 'already-initialized') {
+      return this.alreadyInitializedResult();
+    }
+
+    if (report.bootstrap.mode === 'initialize-empty') {
+      return this.bootstrapEmpty(report);
+    }
+
+    if (
+      report.bootstrap.mode === 'upload-local' ||
+      report.bootstrap.mode === 'resume-local-upload'
+    ) {
+      return this.bootstrapUploadLocal(report.bootstrap.mode);
+    }
+
+    throw new Error(
+      `Bootstrap mode "${report.bootstrap.mode}" is not implemented yet. No automatic local/server merge was performed.`,
+    );
+  }
+
+  async bootstrapAndLog(): Promise<BootstrapExecutionResult> {
+    const result = await this.bootstrap();
+
+    console.group('Flashcards sync bootstrap');
+
+    console.log({
+      status: result.status,
+
+      mode: result.mode,
+
+      initialized: result.initialized,
+
+      serverRevision: result.serverRevision,
+
+      lastSuccessfulSyncAt: result.lastSuccessfulSyncAt,
+
+      uploaded: result.uploaded,
+
+      adopted: result.adopted,
+
+      changedLocalMetadata: result.changedLocalMetadata,
+
+      changedLocalState: result.changedLocalState,
+
+      changedServerData: result.changedServerData,
+    });
+
+    console.groupEnd();
+
+    return result;
+  }
+
+  private async alreadyInitializedResult(): Promise<BootstrapExecutionResult> {
+    const meta = await this.syncStorage.getSyncMeta();
+
+    return {
+      status: 'already-initialized',
+
+      mode: 'already-initialized',
+
+      initialized: meta.initialized,
+
+      serverRevision: meta.serverRevision,
+
+      lastSuccessfulSyncAt: meta.lastSuccessfulSyncAt,
+
+      uploaded: this.emptyTransferCounts(),
+
+      adopted: this.emptyTransferCounts(),
+
+      changedLocalMetadata: false,
+
+      changedLocalState: false,
+
+      changedServerData: false,
+    };
+  }
+
+  private async bootstrapEmpty(report: PullPreviewReport): Promise<BootstrapExecutionResult> {
+    const currentState = this.state.getState();
+
+    if (this.localStateHasData(currentState)) {
+      throw new Error(
+        'Empty bootstrap aborted because local flashcard data appeared after the preview.',
+      );
+    }
+
+    if (
+      report.serverRevision !== 0 ||
+      report.remote.decks !== 0 ||
+      report.remote.cards !== 0 ||
+      report.remote.images !== 0
+    ) {
+      throw new Error('Empty bootstrap aborted because the server is not empty.');
+    }
+
+    const completedAt = new Date().toISOString();
+
+    let changed = false;
+
+    const updatedMeta = await this.syncStorage.updateSyncMeta((meta) => {
+      if (meta.initialized) {
+        return;
+      }
+
+      if (meta.serverRevision !== 0) {
+        throw new Error(
+          `Empty bootstrap expected local serverRevision 0, found ${meta.serverRevision}.`,
+        );
+      }
+
+      if (this.syncMetaHasEntityRecords(meta)) {
+        throw new Error('Empty bootstrap found existing entity sync metadata.');
+      }
+
+      meta.initialized = true;
+
+      meta.serverRevision = 0;
+
+      meta.lastSuccessfulSyncAt = completedAt;
+
+      changed = true;
+    });
+
+    return {
+      status: changed ? 'initialized-empty' : 'already-initialized',
+
+      mode: changed ? 'initialize-empty' : 'already-initialized',
+
+      initialized: updatedMeta.initialized,
+
+      serverRevision: updatedMeta.serverRevision,
+
+      lastSuccessfulSyncAt: updatedMeta.lastSuccessfulSyncAt,
+
+      uploaded: this.emptyTransferCounts(),
+
+      adopted: this.emptyTransferCounts(),
+
+      changedLocalMetadata: changed,
+
+      changedLocalState: false,
+
+      changedServerData: false,
+    };
+  }
+
+  private async bootstrapUploadLocal(
+    requestedMode: 'upload-local' | 'resume-local-upload',
+  ): Promise<BootstrapExecutionResult> {
+    await this.state.whenReady();
+
+    const auth = await this.syncStorage.getDeviceAuth();
+
+    if (!auth?.token) {
+      throw new Error('This device is not registered with the sync server.');
+    }
+
+    const initialState = this.state.getState();
+
+    if (!this.localStateHasData(initialState)) {
+      throw new Error('Local-first bootstrap requires local flashcard data.');
+    }
+
+    const indexes = this.buildLocalIndexes(initialState);
+
+    /*
+     * Make sure every local entity has a bootstrap record.
+     *
+     * This is essential for old production data that existed
+     * before dirty-state tracking was introduced.
+     */
+    await this.ensureLocalBootstrapMetadata(initialState, indexes);
+
+    this.assertLocalStateUnchanged(initialState);
+
+    /*
+     * Always pull from revision 0 during bootstrap.
+     *
+     * The global cursor deliberately stays at 0 until the
+     * ENTIRE local graph has been uploaded and verified.
+     */
+    const serverBefore = await this.syncApi.pull(0, auth.token);
+
+    this.validatePullResponse(serverBefore, 0);
+
+    const imageCache = new Map<string, CachedLocalImage>();
+
+    const adopted = await this.reconcileExistingBootstrapData(
+      initialState,
+      indexes,
+      serverBefore,
+      imageCache,
+    );
+
+    this.assertLocalStateUnchanged(initialState);
+
+    const uploaded = this.emptyTransferCounts();
+
+    await this.uploadBootstrapDecks(initialState, auth.token, uploaded, adopted);
+
+    await this.uploadBootstrapCards(initialState, auth.token, uploaded, adopted);
+
+    await this.uploadBootstrapImages(initialState, auth.token, uploaded, adopted, imageCache);
+
+    this.assertLocalStateUnchanged(initialState);
+
+    /*
+     * The final verification pull is the ONLY source of the
+     * global sync cursor.
+     */
+    const finalPull = await this.syncApi.pull(0, auth.token);
+
+    this.validatePullResponse(finalPull, 0);
+
+    await this.verifyCompleteRemoteDataset(initialState, finalPull, imageCache);
+
+    this.assertLocalStateUnchanged(initialState);
+
+    const completedAt = new Date().toISOString();
+
+    const finalizedMeta = await this.finalizeLocalBootstrap(initialState, finalPull, completedAt);
+
+    return {
+      status: requestedMode === 'resume-local-upload' ? 'resumed-local-upload' : 'uploaded-local',
+
+      mode: requestedMode,
+
+      initialized: finalizedMeta.initialized,
+
+      serverRevision: finalizedMeta.serverRevision,
+
+      lastSuccessfulSyncAt: finalizedMeta.lastSuccessfulSyncAt,
+
+      uploaded,
+
+      adopted,
+
+      changedLocalMetadata: true,
+
+      changedLocalState: false,
+
+      changedServerData: uploaded.decks > 0 || uploaded.cards > 0 || uploaded.images > 0,
+    };
+  }
+
+  // -------------------------------------------------
+  // Bootstrap metadata preparation
+  // -------------------------------------------------
+
+  private async ensureLocalBootstrapMetadata(
+    localState: LocalState,
+    indexes: LocalIndexes,
+  ): Promise<void> {
+    await this.syncStorage.updateSyncMeta((meta) => {
+      if (meta.initialized) {
+        throw new Error(
+          'Local-first bootstrap cannot run because this client is already initialized.',
+        );
+      }
+
+      if (meta.serverRevision !== 0) {
+        throw new Error(
+          `Uninitialized bootstrap expected global cursor 0, found ${meta.serverRevision}.`,
+        );
+      }
+
+      this.assertNoExtraBootstrapMetadata(meta, indexes);
+
+      for (const deck of localState.decks) {
+        this.ensureBootstrapEntityRecord(meta.decks, deck.id);
+
+        for (const card of deck.cards) {
+          this.ensureBootstrapEntityRecord(meta.cards, card.id);
+
+          for (const image of card.front.images) {
+            this.ensureBootstrapEntityRecord(meta.images, image.id);
+          }
+
+          for (const image of card.back.images) {
+            this.ensureBootstrapEntityRecord(meta.images, image.id);
+          }
+        }
+      }
+    });
+  }
+
+  private ensureBootstrapEntityRecord<TSnapshot>(
+    map: Record<string, EntitySyncRecord<TSnapshot>>,
+
+    entityId: string,
+  ): void {
+    const record = map[entityId];
+
+    if (!record) {
+      map[entityId] = {
+        revision: 0,
+
+        baseRevision: 0,
+
+        pendingOperation: 'create',
+
+        lastSyncedSnapshot: null,
+
+        conflict: null,
+      };
+
+      return;
+    }
+
+    if (record.conflict) {
+      throw new Error(`Bootstrap entity "${entityId}" already has an unresolved conflict.`);
+    }
+
+    if (record.pendingOperation === 'create') {
+      if (
+        record.revision !== 0 ||
+        record.baseRevision !== 0 ||
+        record.lastSyncedSnapshot !== null
+      ) {
+        throw new Error(`Bootstrap create metadata for "${entityId}" is inconsistent.`);
+      }
+
+      return;
+    }
+
+    if (record.pendingOperation === null) {
+      if (
+        record.revision <= 0 ||
+        record.baseRevision !== record.revision ||
+        record.lastSyncedSnapshot === null
+      ) {
+        throw new Error(`Bootstrap clean metadata for "${entityId}" is inconsistent.`);
+      }
+
+      return;
+    }
+
+    throw new Error(
+      `Bootstrap cannot continue because "${entityId}" has pending operation "${record.pendingOperation}".`,
+    );
+  }
+
+  private assertNoExtraBootstrapMetadata(
+    meta: StoredSyncMeta,
+
+    indexes: LocalIndexes,
+  ): void {
+    for (const id of Object.keys(meta.decks)) {
+      if (!indexes.decks.has(id)) {
+        throw new Error(
+          `Bootstrap metadata contains deck "${id}", but that deck is absent locally.`,
+        );
+      }
+    }
+
+    for (const id of Object.keys(meta.cards)) {
+      if (!indexes.cards.has(id)) {
+        throw new Error(
+          `Bootstrap metadata contains card "${id}", but that card is absent locally.`,
+        );
+      }
+    }
+
+    for (const id of Object.keys(meta.images)) {
+      if (!indexes.images.has(id)) {
+        throw new Error(
+          `Bootstrap metadata contains image "${id}", but that image is absent locally.`,
+        );
+      }
+    }
+  }
+
+  // -------------------------------------------------
+  // Interrupted-bootstrap reconciliation
+  // -------------------------------------------------
+
+  private async reconcileExistingBootstrapData(
+    localState: LocalState,
+
+    indexes: LocalIndexes,
+
+    response: PullResponse,
+
+    imageCache: Map<string, CachedLocalImage>,
+  ): Promise<BootstrapTransferCounts> {
+    const adopted = this.emptyTransferCounts();
+
+    if (
+      response.decks.some((deck) => !!deck.deleted_at) ||
+      response.cards.some((card) => !!card.deleted_at) ||
+      response.images.some((image) => !!image.deleted_at)
+    ) {
+      throw new Error('Local-first bootstrap found server tombstones. Automatic resume is unsafe.');
+    }
+
+    for (const remoteDeck of response.decks) {
+      const localDeck = indexes.decks.get(remoteDeck.id);
+
+      if (!localDeck) {
+        throw new Error(`Server contains unexpected deck "${remoteDeck.id}".`);
+      }
+
+      const snapshot = this.deckSnapshot(localDeck);
+
+      if (!this.remoteDeckMatchesSnapshot(remoteDeck, snapshot)) {
+        throw new Error(
+          `Server deck "${remoteDeck.id}" does not match the local bootstrap dataset.`,
+        );
+      }
+
+      if (await this.acknowledgeDeckRevision(snapshot, remoteDeck)) {
+        adopted.decks += 1;
+      }
+    }
+
+    for (const remoteCard of response.cards) {
+      const localEntry = indexes.cards.get(remoteCard.id);
+
+      if (!localEntry) {
+        throw new Error(`Server contains unexpected card "${remoteCard.id}".`);
+      }
+
+      const snapshot = this.cardSnapshot(localEntry.deckId, localEntry.card);
+
+      if (!this.remoteCardMatchesSnapshot(remoteCard, snapshot)) {
+        throw new Error(
+          `Server card "${remoteCard.id}" does not match the local bootstrap dataset.`,
+        );
+      }
+
+      if (await this.acknowledgeCardRevision(snapshot, remoteCard)) {
+        adopted.cards += 1;
+      }
+    }
+
+    for (const remoteImage of response.images) {
+      const localEntry = indexes.images.get(remoteImage.id);
+
+      if (!localEntry) {
+        throw new Error(`Server contains unexpected image "${remoteImage.id}".`);
+      }
+
+      const snapshot = this.imageSnapshot(localEntry);
+
+      if (!this.remoteImageMatchesSnapshot(remoteImage, snapshot)) {
+        throw new Error(
+          `Server image "${remoteImage.id}" metadata does not match the local bootstrap dataset.`,
+        );
+      }
+
+      const localImageData = await this.getCachedLocalImage(localEntry, imageCache);
+
+      if (!remoteImage.sha256 || remoteImage.sha256.toLowerCase() !== localImageData.sha256) {
+        throw new Error(`Server image "${remoteImage.id}" does not match the local image bytes.`);
+      }
+
+      if (await this.acknowledgeImageRevision(snapshot, remoteImage)) {
+        adopted.images += 1;
+      }
+    }
+
+    this.assertLocalStateUnchanged(localState);
+
+    return adopted;
+  }
+
+  // -------------------------------------------------
+  // Upload decks
+  // -------------------------------------------------
+
+  private async uploadBootstrapDecks(
+    localState: LocalState,
+
+    token: string,
+
+    uploaded: BootstrapTransferCounts,
+
+    adopted: BootstrapTransferCounts,
+  ): Promise<void> {
+    for (const deck of localState.decks) {
+      this.assertLocalStateUnchanged(localState);
+
+      const meta = await this.syncStorage.getSyncMeta();
+
+      const record = meta.decks[deck.id];
+
+      if (!record) {
+        throw new Error(`Missing bootstrap metadata for deck "${deck.id}".`);
+      }
+
+      if (record.pendingOperation === null) {
+        continue;
+      }
+
+      if (record.pendingOperation !== 'create') {
+        throw new Error(`Deck "${deck.id}" is no longer a bootstrap create.`);
+      }
+
+      const snapshot = this.deckSnapshot(deck);
+
+      const response = await this.syncApi.pushDeck(
+        {
+          operation: 'create',
+
+          base_revision: 0,
+
+          deck: {
+            id: snapshot.id,
+
+            name: snapshot.name,
+
+            description: snapshot.description,
+          },
+        },
+
+        token,
+      );
+
+      this.assertLocalStateUnchanged(localState);
+
+      if (response.status === 'applied') {
+        if (!response.deck || !this.remoteDeckMatchesSnapshot(response.deck, snapshot)) {
+          throw new Error(`Server returned invalid applied deck "${deck.id}".`);
+        }
+
+        await this.acknowledgeDeckRevision(snapshot, response.deck);
+
+        uploaded.decks += 1;
+
+        continue;
+      }
+
+      const remote = response.conflict?.server;
+
+      if (!remote || !this.remoteDeckMatchesSnapshot(remote, snapshot)) {
+        throw new Error(
+          `Bootstrap create conflict for deck "${deck.id}" does not match the local deck.`,
+        );
+      }
+
+      await this.acknowledgeDeckRevision(snapshot, remote);
+
+      adopted.decks += 1;
+    }
+  }
+
+  // -------------------------------------------------
+  // Upload cards
+  // -------------------------------------------------
+
+  private async uploadBootstrapCards(
+    localState: LocalState,
+
+    token: string,
+
+    uploaded: BootstrapTransferCounts,
+
+    adopted: BootstrapTransferCounts,
+  ): Promise<void> {
+    for (const deck of localState.decks) {
+      for (const card of deck.cards) {
+        this.assertLocalStateUnchanged(localState);
+
+        const meta = await this.syncStorage.getSyncMeta();
+
+        const record = meta.cards[card.id];
+
+        if (!record) {
+          throw new Error(`Missing bootstrap metadata for card "${card.id}".`);
+        }
+
+        if (record.pendingOperation === null) {
+          continue;
+        }
+
+        if (record.pendingOperation !== 'create') {
+          throw new Error(`Card "${card.id}" is no longer a bootstrap create.`);
+        }
+
+        const snapshot = this.cardSnapshot(deck.id, card);
+
+        const response = await this.syncApi.pushCard(
+          {
+            operation: 'create',
+
+            base_revision: 0,
+
+            card: {
+              id: snapshot.id,
+
+              deck_id: snapshot.deckId,
+
+              front_text: snapshot.frontText,
+
+              back_text: snapshot.backText,
+
+              difficulty: snapshot.difficulty,
+
+              ...(snapshot.lastReviewedAt
+                ? {
+                    last_reviewed_at: snapshot.lastReviewedAt,
+                  }
+                : {}),
+            },
+          },
+
+          token,
+        );
+
+        this.assertLocalStateUnchanged(localState);
+
+        if (response.status === 'applied') {
+          if (!response.card || !this.remoteCardMatchesSnapshot(response.card, snapshot)) {
+            throw new Error(`Server returned invalid applied card "${card.id}".`);
+          }
+
+          await this.acknowledgeCardRevision(snapshot, response.card);
+
+          uploaded.cards += 1;
+
+          continue;
+        }
+
+        const remote = response.conflict?.server;
+
+        if (!remote || !this.remoteCardMatchesSnapshot(remote, snapshot)) {
+          throw new Error(
+            `Bootstrap create conflict for card "${card.id}" does not match the local card.`,
+          );
+        }
+
+        await this.acknowledgeCardRevision(snapshot, remote);
+
+        adopted.cards += 1;
+      }
+    }
+  }
+
+  // -------------------------------------------------
+  // Upload images
+  // -------------------------------------------------
+
+  private async uploadBootstrapImages(
+    localState: LocalState,
+
+    token: string,
+
+    uploaded: BootstrapTransferCounts,
+
+    adopted: BootstrapTransferCounts,
+
+    imageCache: Map<string, CachedLocalImage>,
+  ): Promise<void> {
+    const indexes = this.buildLocalIndexes(localState);
+
+    for (const entry of indexes.images.values()) {
+      this.assertLocalStateUnchanged(localState);
+
+      const meta = await this.syncStorage.getSyncMeta();
+
+      const record = meta.images[entry.image.id];
+
+      if (!record) {
+        throw new Error(`Missing bootstrap metadata for image "${entry.image.id}".`);
+      }
+
+      if (record.pendingOperation === null) {
+        continue;
+      }
+
+      if (record.pendingOperation !== 'create') {
+        throw new Error(`Image "${entry.image.id}" is no longer a bootstrap create.`);
+      }
+
+      const snapshot = this.imageSnapshot(entry);
+
+      const localImage = await this.getCachedLocalImage(entry, imageCache);
+
+      try {
+        const remote = await this.syncApi.uploadImage(
+          {
+            id: snapshot.id,
+
+            cardId: snapshot.cardId,
+
+            side: snapshot.side,
+
+            position: snapshot.position,
+
+            blob: localImage.blob,
+
+            fileName: localImage.fileName,
+          },
+
+          token,
+        );
+
+        this.assertLocalStateUnchanged(localState);
+
+        if (
+          !this.remoteImageMatchesSnapshot(remote, snapshot) ||
+          !remote.sha256 ||
+          remote.sha256.toLowerCase() !== localImage.sha256
+        ) {
+          throw new Error(`Server returned invalid uploaded image "${snapshot.id}".`);
+        }
+
+        await this.acknowledgeImageRevision(snapshot, remote);
+
+        uploaded.images += 1;
+      } catch (error) {
+        /*
+         * Image creation uses multipart POST and duplicate
+         * IDs return HTTP 409 instead of a normal conflict
+         * payload.
+         *
+         * This can happen after:
+         *
+         *   server committed upload
+         *   client lost response
+         *   browser retried bootstrap
+         *
+         * A full pull plus SHA-256 comparison lets us safely
+         * adopt that already-created image.
+         */
+        if (!(error instanceof SyncApiError) || error.status !== 409) {
+          throw error;
+        }
+
+        const recoveryPull = await this.syncApi.pull(0, token);
+
+        this.validatePullResponse(recoveryPull, 0);
+
+        const remote = recoveryPull.images.find((candidate) => candidate.id === snapshot.id);
+
+        if (
+          !remote ||
+          !!remote.deleted_at ||
+          !this.remoteImageMatchesSnapshot(remote, snapshot) ||
+          !remote.sha256 ||
+          remote.sha256.toLowerCase() !== localImage.sha256
+        ) {
+          throw new Error(
+            `Image "${snapshot.id}" already exists on the server, but it cannot be proven identical to the local image.`,
+          );
+        }
+
+        this.assertLocalStateUnchanged(localState);
+
+        await this.acknowledgeImageRevision(snapshot, remote);
+
+        adopted.images += 1;
+      }
+    }
+  }
+
+  // -------------------------------------------------
+  // Final bootstrap verification
+  // -------------------------------------------------
+
+  private async verifyCompleteRemoteDataset(
+    localState: LocalState,
+
+    response: PullResponse,
+
+    imageCache: Map<string, CachedLocalImage>,
+  ): Promise<void> {
+    if (
+      response.decks.some((deck) => !!deck.deleted_at) ||
+      response.cards.some((card) => !!card.deleted_at) ||
+      response.images.some((image) => !!image.deleted_at)
+    ) {
+      throw new Error('Final bootstrap verification found server tombstones.');
+    }
+
+    const indexes = this.buildLocalIndexes(localState);
+
+    if (response.decks.length !== indexes.decks.size) {
+      throw new Error(
+        `Final bootstrap deck count mismatch: local ${indexes.decks.size}, server ${response.decks.length}.`,
+      );
+    }
+
+    if (response.cards.length !== indexes.cards.size) {
+      throw new Error(
+        `Final bootstrap card count mismatch: local ${indexes.cards.size}, server ${response.cards.length}.`,
+      );
+    }
+
+    if (response.images.length !== indexes.images.size) {
+      throw new Error(
+        `Final bootstrap image count mismatch: local ${indexes.images.size}, server ${response.images.length}.`,
+      );
+    }
+
+    for (const remoteDeck of response.decks) {
+      const local = indexes.decks.get(remoteDeck.id);
+
+      if (!local || !this.remoteDeckMatchesSnapshot(remoteDeck, this.deckSnapshot(local))) {
+        throw new Error(`Final bootstrap verification failed for deck "${remoteDeck.id}".`);
+      }
+    }
+
+    for (const remoteCard of response.cards) {
+      const local = indexes.cards.get(remoteCard.id);
+
+      if (
+        !local ||
+        !this.remoteCardMatchesSnapshot(remoteCard, this.cardSnapshot(local.deckId, local.card))
+      ) {
+        throw new Error(`Final bootstrap verification failed for card "${remoteCard.id}".`);
+      }
+    }
+
+    for (const remoteImage of response.images) {
+      const local = indexes.images.get(remoteImage.id);
+
+      if (!local) {
+        throw new Error(`Final bootstrap verification found unexpected image "${remoteImage.id}".`);
+      }
+
+      const snapshot = this.imageSnapshot(local);
+
+      if (!this.remoteImageMatchesSnapshot(remoteImage, snapshot)) {
+        throw new Error(`Final bootstrap image metadata mismatch for "${remoteImage.id}".`);
+      }
+
+      const localImage = await this.getCachedLocalImage(local, imageCache);
+
+      if (!remoteImage.sha256 || remoteImage.sha256.toLowerCase() !== localImage.sha256) {
+        throw new Error(`Final bootstrap image SHA-256 mismatch for "${remoteImage.id}".`);
+      }
+    }
+  }
+
+  private async finalizeLocalBootstrap(
+    localState: LocalState,
+
+    finalPull: PullResponse,
+
+    completedAt: string,
+  ): Promise<StoredSyncMeta> {
+    const remoteDecks = new Map(finalPull.decks.map((deck) => [deck.id, deck]));
+
+    const remoteCards = new Map(finalPull.cards.map((card) => [card.id, card]));
+
+    const remoteImages = new Map(finalPull.images.map((image) => [image.id, image]));
+
+    return this.syncStorage.updateSyncMeta((meta) => {
+      if (meta.initialized) {
+        throw new Error('Bootstrap finalization found an already initialized client.');
+      }
+
+      if (meta.serverRevision !== 0) {
+        throw new Error(
+          `Bootstrap finalization expected global cursor 0, found ${meta.serverRevision}.`,
+        );
+      }
+
+      const indexes = this.buildLocalIndexes(localState);
+
+      this.assertNoExtraBootstrapMetadata(meta, indexes);
+
+      for (const deck of localState.decks) {
+        const remote = remoteDecks.get(deck.id);
+
+        if (!remote) {
+          throw new Error(`Bootstrap finalization is missing remote deck "${deck.id}".`);
+        }
+
+        this.assertFinalCleanRecord(
+          meta.decks[deck.id],
+          remote.revision,
+          this.deckSnapshot(deck),
+          (a, b) => this.deckSnapshotsEqual(a, b),
+          deck.id,
+        );
+
+        for (const card of deck.cards) {
+          const remoteCard = remoteCards.get(card.id);
+
+          if (!remoteCard) {
+            throw new Error(`Bootstrap finalization is missing remote card "${card.id}".`);
+          }
+
+          this.assertFinalCleanRecord(
+            meta.cards[card.id],
+            remoteCard.revision,
+            this.cardSnapshot(deck.id, card),
+            (a, b) => this.cardSnapshotsEqual(a, b),
+            card.id,
+          );
+        }
+      }
+
+      for (const [imageId, entry] of indexes.images) {
+        const remote = remoteImages.get(imageId);
+
+        if (!remote) {
+          throw new Error(`Bootstrap finalization is missing remote image "${imageId}".`);
+        }
+
+        this.assertFinalCleanRecord(
+          meta.images[imageId],
+          remote.revision,
+          this.imageSnapshot(entry),
+          (a, b) => this.imageSnapshotsEqual(a, b),
+          imageId,
+        );
+      }
+
+      meta.initialized = true;
+
+      meta.serverRevision = finalPull.server_revision;
+
+      meta.lastSuccessfulSyncAt = completedAt;
+    });
+  }
+
+  // -------------------------------------------------
+  // Revision acknowledgement
+  // -------------------------------------------------
+
+  private async acknowledgeDeckRevision(
+    snapshot: DeckSyncSnapshot,
+
+    remote: ApiDeck,
+  ): Promise<boolean> {
+    let changed = false;
+
+    await this.syncStorage.updateSyncMeta((meta) => {
+      changed = this.acceptServerRevision(
+        meta.decks,
+        snapshot.id,
+        remote.revision,
+        snapshot,
+        (a, b) => this.deckSnapshotsEqual(a, b),
+      );
+    });
+
+    return changed;
+  }
+
+  private async acknowledgeCardRevision(
+    snapshot: CardSyncSnapshot,
+
+    remote: ApiCard,
+  ): Promise<boolean> {
+    let changed = false;
+
+    await this.syncStorage.updateSyncMeta((meta) => {
+      changed = this.acceptServerRevision(
+        meta.cards,
+        snapshot.id,
+        remote.revision,
+        snapshot,
+        (a, b) => this.cardSnapshotsEqual(a, b),
+      );
+    });
+
+    return changed;
+  }
+
+  private async acknowledgeImageRevision(
+    snapshot: ImageSyncSnapshot,
+
+    remote: ApiCardImage,
+  ): Promise<boolean> {
+    let changed = false;
+
+    await this.syncStorage.updateSyncMeta((meta) => {
+      changed = this.acceptServerRevision(
+        meta.images,
+        snapshot.id,
+        remote.revision,
+        snapshot,
+        (a, b) => this.imageSnapshotsEqual(a, b),
+      );
+    });
+
+    return changed;
+  }
+
+  private acceptServerRevision<TSnapshot>(
+    map: Record<string, EntitySyncRecord<TSnapshot>>,
+
+    entityId: string,
+
+    remoteRevision: number,
+
+    snapshot: TSnapshot,
+
+    snapshotsEqual: (a: TSnapshot, b: TSnapshot) => boolean,
+  ): boolean {
+    const record = map[entityId];
+
+    if (!record) {
+      throw new Error(`Cannot acknowledge "${entityId}" because its sync metadata is missing.`);
+    }
+
+    if (record.conflict) {
+      throw new Error(`Cannot acknowledge "${entityId}" because it has an unresolved conflict.`);
+    }
+
+    if (record.pendingOperation === null) {
+      if (
+        record.revision !== remoteRevision ||
+        record.baseRevision !== remoteRevision ||
+        !record.lastSyncedSnapshot ||
+        !snapshotsEqual(record.lastSyncedSnapshot, snapshot)
+      ) {
+        throw new Error(
+          `Clean bootstrap metadata for "${entityId}" does not match server revision ${remoteRevision}.`,
+        );
+      }
+
+      return false;
+    }
+
+    if (
+      record.pendingOperation !== 'create' ||
+      record.revision !== 0 ||
+      record.baseRevision !== 0 ||
+      record.lastSyncedSnapshot !== null
+    ) {
+      throw new Error(
+        `Cannot acknowledge "${entityId}" because its bootstrap create metadata is inconsistent.`,
+      );
+    }
+
+    record.revision = remoteRevision;
+
+    record.baseRevision = remoteRevision;
+
+    record.pendingOperation = null;
+
+    record.lastSyncedSnapshot = this.clone(snapshot);
+
+    record.conflict = null;
+
+    return true;
+  }
+
+  private assertFinalCleanRecord<TSnapshot>(
+    record: EntitySyncRecord<TSnapshot> | undefined,
+
+    revision: number,
+
+    snapshot: TSnapshot,
+
+    snapshotsEqual: (a: TSnapshot, b: TSnapshot) => boolean,
+
+    entityId: string,
+  ): void {
+    if (
+      !record ||
+      record.pendingOperation !== null ||
+      record.conflict !== null ||
+      record.revision !== revision ||
+      record.baseRevision !== revision ||
+      !record.lastSyncedSnapshot ||
+      !snapshotsEqual(record.lastSyncedSnapshot, snapshot)
+    ) {
+      throw new Error(`Bootstrap finalization found non-clean metadata for "${entityId}".`);
+    }
+  }
+
+  // -------------------------------------------------
+  // Local images
+  // -------------------------------------------------
+
+  private async getCachedLocalImage(
+    entry: LocalImageEntry,
+
+    cache: Map<string, CachedLocalImage>,
+  ): Promise<CachedLocalImage> {
+    const existing = cache.get(entry.image.id);
+
+    if (existing) {
+      return existing;
+    }
+
+    const blob = await this.dataUrlToBlob(entry.image.dataUrl);
+
+    const allowedTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+    if (!allowedTypes.has(blob.type)) {
+      throw new Error(
+        `Image "${entry.image.id}" has unsupported MIME type "${blob.type || 'unknown'}".`,
+      );
+    }
+
+    const sha256 = await this.sha256Blob(blob);
+
+    const extension = this.imageFileExtension(blob.type);
+
+    const result: CachedLocalImage = {
+      blob,
+
+      sha256,
+
+      fileName: `${entry.image.id}.${extension}`,
+    };
+
+    cache.set(entry.image.id, result);
+
+    return result;
+  }
+
+  private async dataUrlToBlob(dataUrl: string): Promise<Blob> {
+    if (!dataUrl.startsWith('data:')) {
+      throw new Error('Local image is not stored as a data URL.');
+    }
+
+    const response = await fetch(dataUrl);
+
+    if (!response.ok) {
+      throw new Error('Could not decode local image data URL.');
+    }
+
+    return response.blob();
+  }
+
+  private async sha256Blob(blob: Blob): Promise<string> {
+    if (!globalThis.crypto?.subtle) {
+      throw new Error('Web Crypto SHA-256 is not available in this browser.');
+    }
+
+    const bytes = await blob.arrayBuffer();
+
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+
+    return Array.from(new Uint8Array(digest))
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('');
+  }
+
+  private imageFileExtension(mimeType: string): string {
+    switch (mimeType) {
+      case 'image/png':
+        return 'png';
+
+      case 'image/jpeg':
+        return 'jpg';
+
+      case 'image/gif':
+        return 'gif';
+
+      case 'image/webp':
+        return 'webp';
+
+      default:
+        throw new Error(`Unsupported image MIME type "${mimeType}".`);
+    }
+  }
+
+  // -------------------------------------------------
+  // Bootstrap classification
+  // -------------------------------------------------
+
   private buildPreviewReport(
-    localState: ReturnType<FlashcardsStateService['getState']>,
+    localState: LocalState,
 
     meta: StoredSyncMeta,
 
@@ -542,7 +1573,7 @@ export class SyncEngineService {
   }
 
   private assessBootstrap(
-    localState: ReturnType<FlashcardsStateService['getState']>,
+    localState: LocalState,
 
     meta: StoredSyncMeta,
 
@@ -586,8 +1617,7 @@ export class SyncEngineService {
 
         safeToProceed: true,
 
-        reason:
-          'Both the local client and the server are empty. Bootstrap only needs to mark this client initialized at server revision 0.',
+        reason: 'Both the local client and the server are empty.',
 
         localHasData,
 
@@ -624,8 +1654,7 @@ export class SyncEngineService {
 
         safeToProceed: true,
 
-        reason:
-          'The local client is empty and the server already has sync history. The server dataset can bootstrap this client.',
+        reason: 'The local client is empty and the server already has sync history.',
 
         localHasData,
 
@@ -637,7 +1666,7 @@ export class SyncEngineService {
       };
     }
 
-    const resumableUpload = this.isResumableLocalBootstrap(localState, meta, response);
+    const resumableUpload = this.isResumableLocalBootstrapCandidate(localState, meta, response);
 
     if (resumableUpload) {
       return {
@@ -646,7 +1675,7 @@ export class SyncEngineService {
         safeToProceed: true,
 
         reason:
-          'Local data and server data both exist, but the remote objects exactly match entities already acknowledged during an unfinished local-first bootstrap. The upload can safely resume.',
+          'The server state is structurally consistent with an interrupted local-first bootstrap. Existing image bytes will be SHA-256 verified before they are adopted.',
 
         localHasData,
 
@@ -664,7 +1693,7 @@ export class SyncEngineService {
       safeToProceed: false,
 
       reason:
-        'Both local and server data exist on an uninitialized client, and the server state cannot be proven to belong to an interrupted local-first bootstrap. Automatic bootstrap must stop to avoid silent merging or data loss.',
+        'Both local and server data exist on an uninitialized client, and the server state cannot be proven to belong to an interrupted local-first bootstrap.',
 
       localHasData,
 
@@ -676,30 +1705,13 @@ export class SyncEngineService {
     };
   }
 
-  private localStateHasData(localState: ReturnType<FlashcardsStateService['getState']>): boolean {
-    return localState.decks.length > 0;
-  }
-
-  private syncMetaHasEntityRecords(meta: StoredSyncMeta): boolean {
-    return (
-      Object.keys(meta.decks).length > 0 ||
-      Object.keys(meta.cards).length > 0 ||
-      Object.keys(meta.images).length > 0
-    );
-  }
-
-  private isResumableLocalBootstrap(
-    localState: ReturnType<FlashcardsStateService['getState']>,
+  private isResumableLocalBootstrapCandidate(
+    localState: LocalState,
 
     meta: StoredSyncMeta,
 
     response: PullResponse,
   ): boolean {
-    /*
-     * A local-first bootstrap never creates tombstones.
-     * Seeing one means the server has history that cannot
-     * be explained purely by our interrupted initial upload.
-     */
     if (
       response.decks.some((deck) => !!deck.deleted_at) ||
       response.cards.some((card) => !!card.deleted_at) ||
@@ -708,53 +1720,12 @@ export class SyncEngineService {
       return false;
     }
 
-    const localDecks = new Map(localState.decks.map((deck) => [deck.id, deck]));
+    let indexes: LocalIndexes;
 
-    const localCards = new Map<
-      string,
-      {
-        deckId: string;
-        card: ReturnType<FlashcardsStateService['getState']>['decks'][number]['cards'][number];
-      }
-    >();
-
-    const localImages = new Map<
-      string,
-      {
-        cardId: string;
-        side: 'front' | 'back';
-        position: number;
-      }
-    >();
-
-    for (const deck of localState.decks) {
-      for (const card of deck.cards) {
-        localCards.set(card.id, {
-          deckId: deck.id,
-
-          card,
-        });
-
-        card.front.images.forEach((image, position) => {
-          localImages.set(image.id, {
-            cardId: card.id,
-
-            side: 'front',
-
-            position,
-          });
-        });
-
-        card.back.images.forEach((image, position) => {
-          localImages.set(image.id, {
-            cardId: card.id,
-
-            side: 'back',
-
-            position,
-          });
-        });
-      }
+    try {
+      indexes = this.buildLocalIndexes(localState);
+    } catch {
+      return false;
     }
 
     for (const deck of localState.decks) {
@@ -781,95 +1752,110 @@ export class SyncEngineService {
       }
     }
 
-    for (const deck of response.decks) {
-      const local = localDecks.get(deck.id);
+    for (const remote of response.decks) {
+      const local = indexes.decks.get(remote.id);
 
-      const record = meta.decks[deck.id];
-
-      if (
-        !local ||
-        !record ||
-        record.pendingOperation !== null ||
-        record.conflict !== null ||
-        record.revision !== deck.revision ||
-        record.baseRevision !== deck.revision ||
-        !record.lastSyncedSnapshot
-      ) {
+      if (!local) {
         return false;
       }
 
-      const snapshot = record.lastSyncedSnapshot;
+      const snapshot = this.deckSnapshot(local);
 
       if (
-        snapshot.id !== deck.id ||
-        snapshot.name !== deck.name ||
-        (snapshot.description ?? undefined) !== (deck.description ?? undefined)
+        !this.remoteDeckMatchesSnapshot(remote, snapshot) ||
+        !this.bootstrapRecordMatchesRemote(
+          meta.decks[remote.id],
+          remote.revision,
+          snapshot,
+          (a, b) => this.deckSnapshotsEqual(a, b),
+        )
       ) {
         return false;
       }
     }
 
-    for (const card of response.cards) {
-      const local = localCards.get(card.id);
+    for (const remote of response.cards) {
+      const local = indexes.cards.get(remote.id);
 
-      const record = meta.cards[card.id];
-
-      if (
-        !local ||
-        !record ||
-        record.pendingOperation !== null ||
-        record.conflict !== null ||
-        record.revision !== card.revision ||
-        record.baseRevision !== card.revision ||
-        !record.lastSyncedSnapshot
-      ) {
+      if (!local) {
         return false;
       }
 
-      const snapshot = record.lastSyncedSnapshot;
+      const snapshot = this.cardSnapshot(local.deckId, local.card);
 
       if (
-        snapshot.id !== card.id ||
-        snapshot.deckId !== card.deck_id ||
-        snapshot.frontText !== card.front_text ||
-        snapshot.backText !== card.back_text ||
-        snapshot.difficulty !== card.difficulty ||
-        snapshot.lastReviewedAt !== (card.last_reviewed_at ?? null)
+        !this.remoteCardMatchesSnapshot(remote, snapshot) ||
+        !this.bootstrapRecordMatchesRemote(
+          meta.cards[remote.id],
+          remote.revision,
+          snapshot,
+          (a, b) => this.cardSnapshotsEqual(a, b),
+        )
       ) {
         return false;
       }
     }
 
-    for (const image of response.images) {
-      const local = localImages.get(image.id);
+    for (const remote of response.images) {
+      const local = indexes.images.get(remote.id);
 
-      const record = meta.images[image.id];
-
-      if (
-        !local ||
-        !record ||
-        record.pendingOperation !== null ||
-        record.conflict !== null ||
-        record.revision !== image.revision ||
-        record.baseRevision !== image.revision ||
-        !record.lastSyncedSnapshot
-      ) {
+      if (!local) {
         return false;
       }
 
-      const snapshot = record.lastSyncedSnapshot;
+      const snapshot = this.imageSnapshot(local);
 
       if (
-        snapshot.id !== image.id ||
-        snapshot.cardId !== image.card_id ||
-        snapshot.side !== image.side ||
-        snapshot.position !== image.position
+        !remote.sha256 ||
+        !this.remoteImageMatchesSnapshot(remote, snapshot) ||
+        !this.bootstrapRecordMatchesRemote(
+          meta.images[remote.id],
+          remote.revision,
+          snapshot,
+          (a, b) => this.imageSnapshotsEqual(a, b),
+        )
       ) {
         return false;
       }
     }
 
     return response.decks.length > 0 || response.cards.length > 0 || response.images.length > 0;
+  }
+
+  private bootstrapRecordMatchesRemote<TSnapshot>(
+    record: EntitySyncRecord<TSnapshot> | undefined,
+
+    remoteRevision: number,
+
+    localSnapshot: TSnapshot,
+
+    snapshotsEqual: (a: TSnapshot, b: TSnapshot) => boolean,
+  ): boolean {
+    if (!record || record.conflict) {
+      return false;
+    }
+
+    /*
+     * Server commit may have succeeded immediately before
+     * the client lost the response. In that case the local
+     * record still legitimately says "create".
+     */
+    if (record.pendingOperation === 'create') {
+      return (
+        record.revision === 0 && record.baseRevision === 0 && record.lastSyncedSnapshot === null
+      );
+    }
+
+    if (record.pendingOperation === null) {
+      return (
+        record.revision === remoteRevision &&
+        record.baseRevision === remoteRevision &&
+        record.lastSyncedSnapshot !== null &&
+        snapshotsEqual(record.lastSyncedSnapshot, localSnapshot)
+      );
+    }
+
+    return false;
   }
 
   private isSafeBootstrapRecord<TSnapshot>(
@@ -900,6 +1886,10 @@ export class SyncEngineService {
     return false;
   }
 
+  // -------------------------------------------------
+  // Preview individual entities
+  // -------------------------------------------------
+
   private previewDeck(
     deck: ApiDeck,
 
@@ -909,15 +1899,10 @@ export class SyncEngineService {
   ): PullPreviewItem {
     return this.previewEntity(
       'deck',
-
       deck.id,
-
       deck.revision,
-
       !!deck.deleted_at,
-
       localExists,
-
       meta.decks[deck.id],
     );
   }
@@ -931,15 +1916,10 @@ export class SyncEngineService {
   ): PullPreviewItem {
     return this.previewEntity(
       'card',
-
       card.id,
-
       card.revision,
-
       !!card.deleted_at,
-
       localExists,
-
       meta.cards[card.id],
     );
   }
@@ -953,15 +1933,10 @@ export class SyncEngineService {
   ): PullPreviewItem {
     const item = this.previewEntity(
       'image',
-
       image.id,
-
       image.revision,
-
       !!image.deleted_at,
-
       localExists,
-
       meta.images[image.id],
     );
 
@@ -1044,8 +2019,7 @@ export class SyncEngineService {
 
           action: 'would-conflict-untracked-local',
 
-          reason:
-            'A local entity with the same ID exists but has no known server ancestry. It must not be silently overwritten during bootstrap.',
+          reason: 'A local entity with the same ID exists but has no known server ancestry.',
         };
       }
 
@@ -1055,8 +2029,7 @@ export class SyncEngineService {
 
           action: 'would-record-tombstone',
 
-          reason:
-            'The server reports a deleted entity that is already absent locally. A future sync only needs to remember its server revision.',
+          reason: 'The server reports a deleted entity that is already absent locally.',
         };
       }
 
@@ -1126,6 +2099,258 @@ export class SyncEngineService {
       action === 'would-restore-missing-local'
     );
   }
+
+  // -------------------------------------------------
+  // Local graph
+  // -------------------------------------------------
+
+  private buildLocalIndexes(localState: LocalState): LocalIndexes {
+    const decks = new Map<string, LocalDeck>();
+
+    const cards = new Map<string, LocalCardEntry>();
+
+    const images = new Map<string, LocalImageEntry>();
+
+    for (const deck of localState.decks) {
+      if (decks.has(deck.id)) {
+        throw new Error(`Duplicate local deck ID "${deck.id}".`);
+      }
+
+      decks.set(deck.id, deck);
+
+      for (const card of deck.cards) {
+        if (cards.has(card.id)) {
+          throw new Error(`Duplicate local card ID "${card.id}".`);
+        }
+
+        cards.set(card.id, {
+          deckId: deck.id,
+
+          card,
+        });
+
+        card.front.images.forEach((image, position) => {
+          this.addLocalImageIndex(images, {
+            cardId: card.id,
+
+            side: 'front',
+
+            position,
+
+            image,
+          });
+        });
+
+        card.back.images.forEach((image, position) => {
+          this.addLocalImageIndex(images, {
+            cardId: card.id,
+
+            side: 'back',
+
+            position,
+
+            image,
+          });
+        });
+      }
+    }
+
+    return {
+      decks,
+      cards,
+      images,
+    };
+  }
+
+  private addLocalImageIndex(
+    images: Map<string, LocalImageEntry>,
+
+    entry: LocalImageEntry,
+  ): void {
+    if (images.has(entry.image.id)) {
+      throw new Error(`Duplicate local image ID "${entry.image.id}".`);
+    }
+
+    images.set(entry.image.id, entry);
+  }
+
+  private assertLocalStateUnchanged(expected: LocalState): void {
+    const current = this.state.getState();
+
+    if (JSON.stringify(current) !== JSON.stringify(expected)) {
+      throw new Error(
+        'Local flashcard data changed while bootstrap was running. Bootstrap stopped before accepting further server state.',
+      );
+    }
+  }
+
+  private localStateHasData(localState: LocalState): boolean {
+    return localState.decks.length > 0;
+  }
+
+  private syncMetaHasEntityRecords(meta: StoredSyncMeta): boolean {
+    return (
+      Object.keys(meta.decks).length > 0 ||
+      Object.keys(meta.cards).length > 0 ||
+      Object.keys(meta.images).length > 0
+    );
+  }
+
+  // -------------------------------------------------
+  // Snapshots
+  // -------------------------------------------------
+
+  private deckSnapshot(deck: LocalDeck): DeckSyncSnapshot {
+    return {
+      id: deck.id,
+
+      name: deck.name,
+
+      description: deck.description,
+    };
+  }
+
+  private cardSnapshot(
+    deckId: string,
+
+    card: LocalCard,
+  ): CardSyncSnapshot {
+    return {
+      id: card.id,
+
+      deckId,
+
+      frontText: card.front.text,
+
+      backText: card.back.text,
+
+      difficulty: card.difficulty,
+
+      lastReviewedAt: card.lastReviewedAt,
+    };
+  }
+
+  private imageSnapshot(entry: LocalImageEntry): ImageSyncSnapshot {
+    return {
+      id: entry.image.id,
+
+      cardId: entry.cardId,
+
+      side: entry.side,
+
+      position: entry.position,
+    };
+  }
+
+  private deckSnapshotsEqual(
+    a: DeckSyncSnapshot,
+
+    b: DeckSyncSnapshot,
+  ): boolean {
+    return (
+      a.id === b.id &&
+      a.name === b.name &&
+      (a.description ?? undefined) === (b.description ?? undefined)
+    );
+  }
+
+  private cardSnapshotsEqual(
+    a: CardSyncSnapshot,
+
+    b: CardSyncSnapshot,
+  ): boolean {
+    return (
+      a.id === b.id &&
+      a.deckId === b.deckId &&
+      a.frontText === b.frontText &&
+      a.backText === b.backText &&
+      a.difficulty === b.difficulty &&
+      this.timestampsEqual(a.lastReviewedAt, b.lastReviewedAt)
+    );
+  }
+
+  private imageSnapshotsEqual(
+    a: ImageSyncSnapshot,
+
+    b: ImageSyncSnapshot,
+  ): boolean {
+    return a.id === b.id && a.cardId === b.cardId && a.side === b.side && a.position === b.position;
+  }
+
+  // -------------------------------------------------
+  // Remote/local comparisons
+  // -------------------------------------------------
+
+  private remoteDeckMatchesSnapshot(
+    remote: ApiDeck,
+
+    local: DeckSyncSnapshot,
+  ): boolean {
+    return (
+      !remote.deleted_at &&
+      remote.id === local.id &&
+      remote.name === local.name &&
+      (remote.description ?? undefined) === (local.description ?? undefined)
+    );
+  }
+
+  private remoteCardMatchesSnapshot(
+    remote: ApiCard,
+
+    local: CardSyncSnapshot,
+  ): boolean {
+    return (
+      !remote.deleted_at &&
+      remote.id === local.id &&
+      remote.deck_id === local.deckId &&
+      remote.front_text === local.frontText &&
+      remote.back_text === local.backText &&
+      remote.difficulty === local.difficulty &&
+      this.timestampsEqual(remote.last_reviewed_at ?? null, local.lastReviewedAt)
+    );
+  }
+
+  private remoteImageMatchesSnapshot(
+    remote: ApiCardImage,
+
+    local: ImageSyncSnapshot,
+  ): boolean {
+    return (
+      !remote.deleted_at &&
+      remote.id === local.id &&
+      remote.card_id === local.cardId &&
+      remote.side === local.side &&
+      remote.position === local.position
+    );
+  }
+
+  private timestampsEqual(
+    a: string | null | undefined,
+
+    b: string | null | undefined,
+  ): boolean {
+    const left = a ?? null;
+
+    const right = b ?? null;
+
+    if (left === null || right === null) {
+      return left === right;
+    }
+
+    const leftTime = Date.parse(left);
+
+    const rightTime = Date.parse(right);
+
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
+      return leftTime === rightTime;
+    }
+
+    return left === right;
+  }
+
+  // -------------------------------------------------
+  // Pull validation
+  // -------------------------------------------------
 
   private validatePullResponse(
     response: PullResponse,
@@ -1199,6 +2424,28 @@ export class SyncEngineService {
           `Sync server returned invalid ${entity.type} revision data for "${entity.id}".`,
         );
       }
+    }
+  }
+
+  // -------------------------------------------------
+  // Helpers
+  // -------------------------------------------------
+
+  private emptyTransferCounts(): BootstrapTransferCounts {
+    return {
+      decks: 0,
+
+      cards: 0,
+
+      images: 0,
+    };
+  }
+
+  private clone<T>(value: T): T {
+    try {
+      return structuredClone(value);
+    } catch {
+      return JSON.parse(JSON.stringify(value)) as T;
     }
   }
 }
