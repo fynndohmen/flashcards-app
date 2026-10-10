@@ -2141,11 +2141,11 @@ export class SyncEngineService {
       },
 
       remote: {
-        decks: response.decks.length,
+        decks: response.decks.filter((deck) => !deck.deleted_at).length,
 
-        cards: response.cards.length,
+        cards: response.cards.filter((card) => !card.deleted_at).length,
 
-        images: response.images.length,
+        images: response.images.filter((image) => !image.deleted_at).length,
       },
 
       actionCounts,
