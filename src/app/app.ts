@@ -110,6 +110,11 @@ export class AppComponent {
   syncActionMessage = '';
   syncActionError = '';
 
+  bootstrapPreview: PullPreviewReport | null = null;
+  isAssessingBootstrap = false;
+  isDownloadingInitialData = false;
+  bootstrapAssessmentError = '';
+
   syncMetaInitialized = false;
   syncServerRevision = 0;
   syncLastSuccessfulAt: string | null = null;
@@ -303,10 +308,110 @@ export class AppComponent {
       const meta = await this.syncStorage.getSyncMeta();
 
       this.applySyncMetaToUi(meta);
+
+      if (meta.initialized) {
+        this.bootstrapPreview = null;
+        this.bootstrapAssessmentError = '';
+      } else {
+        await this.refreshBootstrapAssessment();
+      }
     } catch (err) {
       console.error('Failed to refresh sync metadata', err);
 
       this.syncActionError = 'Could not read the local sync state.';
+    }
+  }
+
+  async refreshBootstrapAssessment(): Promise<void> {
+    if (
+      this.syncMetaInitialized ||
+      !this.isDeviceRegistered ||
+      this.syncServerStatus !== 'online' ||
+      this.isDownloadingInitialData
+    ) {
+      this.bootstrapPreview = null;
+      this.bootstrapAssessmentError = '';
+      return;
+    }
+
+    this.isAssessingBootstrap = true;
+    this.bootstrapAssessmentError = '';
+
+    try {
+      this.bootstrapPreview = await this.syncEngine.previewPull();
+    } catch (err) {
+      console.error('Initial sync assessment failed', err);
+      this.bootstrapPreview = null;
+      this.bootstrapAssessmentError = this.describeSyncActionError(err);
+    } finally {
+      this.isAssessingBootstrap = false;
+    }
+  }
+
+  async downloadInitialData(): Promise<void> {
+    this.syncActionMessage = '';
+    this.syncActionError = '';
+    this.bootstrapAssessmentError = '';
+
+    if (!this.isDeviceRegistered) {
+      this.syncActionError = 'Register this device before downloading sync data.';
+      return;
+    }
+
+    if (this.syncServerStatus !== 'online') {
+      this.syncActionError = 'The home sync server is currently not reachable.';
+      return;
+    }
+
+    if (this.syncMetaInitialized) {
+      this.syncActionError = 'This device is already initialized. Use Sync now instead.';
+      return;
+    }
+
+    this.isDownloadingInitialData = true;
+
+    try {
+      const preview = await this.syncEngine.previewPull();
+
+      this.bootstrapPreview = preview;
+
+      if (!preview.bootstrap.safeToProceed || preview.bootstrap.mode !== 'download-server') {
+        throw new Error(
+          `Initial server download is not available in the current state: ${preview.bootstrap.reason}`,
+        );
+      }
+
+      if (preview.local.decks !== 0 || preview.local.cards !== 0 || preview.local.images !== 0) {
+        throw new Error(
+          'Initial server download requires an empty local flashcard state. Local data was detected.',
+        );
+      }
+
+      const result = await this.syncEngine.bootstrap();
+
+      if (result.status !== 'downloaded-server' && result.status !== 'already-initialized') {
+        throw new Error(
+          `Initial setup changed unexpectedly and finished as "${result.status}".`,
+        );
+      }
+
+      this.reloadDecks();
+
+      await this.refreshSyncState();
+
+      if (result.status === 'downloaded-server') {
+        this.syncActionMessage =
+          `Initial download complete: ${result.downloaded.decks} deck(s), ` +
+          `${result.downloaded.cards} card(s), ${result.downloaded.images} image(s). ` +
+          'Normal synchronization is ready.';
+      } else {
+        this.syncActionMessage = 'This device is already initialized and ready to synchronize.';
+      }
+    } catch (err) {
+      console.error('Initial server download failed', err);
+      this.syncActionError = this.describeSyncActionError(err);
+    } finally {
+      this.isDownloadingInitialData = false;
     }
   }
 
@@ -355,7 +460,10 @@ export class AppComponent {
     }
   }
 
-  async resolveConflict(item: SyncConflictUiItem, choice: 'cloud' | 'this-device'): Promise<void> {
+  async resolveConflict(
+    item: SyncConflictUiItem,
+    choice: 'cloud' | 'this-device',
+  ): Promise<void> {
     if (!item.canResolve || (item.entityType !== 'deck' && item.entityType !== 'card')) {
       return;
     }
@@ -481,7 +589,9 @@ export class AppComponent {
     this.rebuildMergeForms(meta);
   }
 
-  private countPendingOperations(records: Record<string, { pendingOperation: unknown }>): number {
+  private countPendingOperations(
+    records: Record<string, { pendingOperation: unknown }>,
+  ): number {
     return Object.values(records).filter((record) => record.pendingOperation !== null).length;
   }
 
@@ -518,7 +628,10 @@ export class AppComponent {
     const server = conflict.server;
 
     const canResolve =
-      !conflict.localDeleted && !conflict.serverDeleted && local !== null && server !== null;
+      !conflict.localDeleted &&
+      !conflict.serverDeleted &&
+      local !== null &&
+      server !== null;
 
     return {
       key: `deck:${entityId}`,
@@ -560,10 +673,12 @@ export class AppComponent {
     const server = conflict.server;
 
     const canResolve =
-      !conflict.localDeleted && !conflict.serverDeleted && local !== null && server !== null;
+      !conflict.localDeleted &&
+      !conflict.serverDeleted &&
+      local !== null &&
+      server !== null;
 
-    const preview =
-      local?.frontText || server?.frontText || base?.frontText || this.shortId(entityId);
+    const preview = local?.frontText || server?.frontText || base?.frontText || this.shortId(entityId);
 
     return {
       key: `card:${entityId}`,
@@ -717,12 +832,11 @@ export class AppComponent {
             conflict.local.difficulty,
             conflict.server.difficulty,
           ),
-          lastReviewedAt:
-            this.chooseThreeWayValue(
-              conflict.base?.lastReviewedAt ?? null,
-              conflict.local.lastReviewedAt,
-              conflict.server.lastReviewedAt,
-            ) ?? '',
+          lastReviewedAt: this.chooseThreeWayValue(
+            conflict.base?.lastReviewedAt ?? null,
+            conflict.local.lastReviewedAt,
+            conflict.server.lastReviewedAt,
+          ) ?? '',
         };
       }
     }
@@ -933,6 +1047,7 @@ export class AppComponent {
         this.deckViewMode = null;
         this.exitPracticeMode();
         this.resetCardForm();
+        await this.refreshSyncState();
         alert('Import successful.');
       } catch (err) {
         console.error('Import failed', err);

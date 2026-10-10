@@ -637,6 +637,34 @@ button:disabled {
   color: #f2cc60;
 }
 
+.sync-bootstrap-panel {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid #30363d;
+  border-radius: 0.75rem;
+  background: #0d1117;
+}
+
+.sync-bootstrap-header h4 {
+  margin: 0 0 0.25rem;
+}
+
+.sync-bootstrap-counts {
+  margin-top: 0.9rem;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.sync-bootstrap-revision {
+  font-size: 0.75rem;
+  color: #8b949e;
+}
+
+.sync-bootstrap-action {
+  margin-top: 0.9rem;
+}
+
 .sync-conflict-section {
   margin-top: 1.25rem;
   display: flex;
@@ -837,5 +865,11 @@ button:disabled {
 
   .sync-conflict-time {
     white-space: normal;
+  }
+}
+
+@media (max-width: 600px) {
+  .sync-bootstrap-counts {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

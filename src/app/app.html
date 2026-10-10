@@ -138,18 +138,33 @@
             </div>
 
             <button
+              *ngIf="syncMetaInitialized"
               type="button"
               (click)="syncNow()"
-              [disabled]="isSyncing || syncServerStatus !== 'online' || !syncMetaInitialized"
+              [disabled]="isSyncing || syncServerStatus !== 'online'"
             >
               {{ isSyncing ? 'Syncing...' : 'Sync now' }}
+            </button>
+
+            <button
+              *ngIf="!syncMetaInitialized"
+              type="button"
+              class="secondary"
+              (click)="refreshBootstrapAssessment()"
+              [disabled]="
+                isAssessingBootstrap ||
+                isDownloadingInitialData ||
+                syncServerStatus !== 'online'
+              "
+            >
+              {{ isAssessingBootstrap ? 'Checking setup...' : 'Recheck initial setup' }}
             </button>
           </div>
 
           <div class="sync-summary-grid">
             <div class="sync-summary-item">
               <span class="sync-summary-label">Initialization</span>
-              <strong>{{ syncMetaInitialized ? 'Ready' : 'Bootstrap required' }}</strong>
+              <strong>{{ syncMetaInitialized ? 'Ready' : 'Setup required' }}</strong>
             </div>
 
             <div class="sync-summary-item">
@@ -172,14 +187,108 @@
             <div class="sync-summary-item sync-summary-wide">
               <span class="sync-summary-label">Last successful sync</span>
               <strong>
-                {{ syncLastSuccessfulAt ? (syncLastSuccessfulAt | date: 'medium') : 'Never' }}
+                {{
+                  syncLastSuccessfulAt
+                    ? (syncLastSuccessfulAt | date: 'medium')
+                    : 'Never'
+                }}
               </strong>
             </div>
           </div>
 
-          <p *ngIf="!syncMetaInitialized" class="sync-feedback warning">
-            This device still needs its initial bootstrap before normal incremental sync can run.
-          </p>
+          <section class="sync-bootstrap-panel" *ngIf="!syncMetaInitialized">
+            <div class="sync-bootstrap-header">
+              <div>
+                <h4>Initial device setup</h4>
+                <p class="hint">
+                  New devices download the existing dataset from the home sync server. The normal
+                  setup screen never uploads an uninitialized device's local data.
+                </p>
+              </div>
+            </div>
+
+            <p *ngIf="isAssessingBootstrap" class="hint">
+              Checking the local device and server dataset...
+            </p>
+
+            <p *ngIf="bootstrapAssessmentError" class="sync-feedback error">
+              {{ bootstrapAssessmentError }}
+            </p>
+
+            <ng-container *ngIf="bootstrapPreview as preview">
+              <div class="sync-bootstrap-counts">
+                <div class="sync-summary-item">
+                  <span class="sync-summary-label">This device</span>
+                  <strong>
+                    {{ preview.local.decks }} decks · {{ preview.local.cards }} cards ·
+                    {{ preview.local.images }} images
+                  </strong>
+                </div>
+
+                <div class="sync-summary-item">
+                  <span class="sync-summary-label">Sync server</span>
+                  <strong>
+                    {{ preview.remote.decks }} decks · {{ preview.remote.cards }} cards ·
+                    {{ preview.remote.images }} images
+                  </strong>
+                  <span class="sync-bootstrap-revision">
+                    revision {{ preview.serverRevision }}
+                  </span>
+                </div>
+              </div>
+
+              <ng-container [ngSwitch]="preview.bootstrap.mode">
+                <div *ngSwitchCase="'download-server'" class="sync-bootstrap-action">
+                  <p class="sync-feedback success">
+                    This is a new empty device and the server already contains sync data. It is safe
+                    to download the server dataset.
+                  </p>
+
+                  <button
+                    type="button"
+                    (click)="downloadInitialData()"
+                    [disabled]="
+                      isDownloadingInitialData ||
+                      isAssessingBootstrap ||
+                      syncServerStatus !== 'online'
+                    "
+                  >
+                    {{
+                      isDownloadingInitialData
+                        ? 'Downloading initial data...'
+                        : 'Download data from server'
+                    }}
+                  </button>
+                </div>
+
+                <p *ngSwitchCase="'initialize-empty'" class="sync-feedback warning">
+                  The server does not contain a sync dataset yet. Normal new-device setup cannot
+                  continue from an empty server.
+                </p>
+
+                <p *ngSwitchCase="'upload-local'" class="sync-feedback warning">
+                  Local flashcard data exists on this uninitialized device while the server is
+                  empty. Automatic local-first upload is deliberately disabled in the normal setup
+                  UI. Use the recovery/maintenance workflow instead.
+                </p>
+
+                <p *ngSwitchCase="'resume-local-upload'" class="sync-feedback warning">
+                  This device looks like an interrupted local-first recovery upload. Automatic
+                  upload is deliberately disabled in the normal setup UI. Continue only through the
+                  recovery/maintenance workflow.
+                </p>
+
+                <p *ngSwitchCase="'blocked-mixed'" class="sync-feedback error">
+                  Initial setup is blocked because local and server state cannot be reconciled
+                  safely: {{ preview.bootstrap.reason }}
+                </p>
+
+                <p *ngSwitchCase="'already-initialized'" class="sync-feedback success">
+                  This device is already initialized. Refresh the page to use normal synchronization.
+                </p>
+              </ng-container>
+            </ng-container>
+          </section>
 
           <p *ngIf="syncActionMessage" class="sync-feedback success">
             {{ syncActionMessage }}
@@ -199,7 +308,9 @@
                 </p>
               </div>
 
-              <button type="button" class="secondary" (click)="refreshSyncState()">Refresh</button>
+              <button type="button" class="secondary" (click)="refreshSyncState()">
+                Refresh
+              </button>
             </div>
 
             <article class="sync-conflict-card" *ngFor="let conflict of syncConflicts">
@@ -282,7 +393,8 @@
                   <div
                     class="sync-merge-form"
                     *ngIf="
-                      conflict.entityType === 'deck' && deckMergeForms[conflict.entityId] as merge
+                      conflict.entityType === 'deck' &&
+                      deckMergeForms[conflict.entityId] as merge
                     "
                   >
                     <label>
@@ -307,7 +419,8 @@
                   <div
                     class="sync-merge-form"
                     *ngIf="
-                      conflict.entityType === 'card' && cardMergeForms[conflict.entityId] as merge
+                      conflict.entityType === 'card' &&
+                      cardMergeForms[conflict.entityId] as merge
                     "
                   >
                     <label>
