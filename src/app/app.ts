@@ -1,5 +1,5 @@
 // src/app/app.ts
-import { Component } from '@angular/core';
+import { Component, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import {
@@ -72,6 +72,7 @@ type FlashcardsDebugGlobal = typeof globalThis & {
   standalone: true,
   imports: [CommonModule, FormsModule],
   templateUrl: './app.html',
+  changeDetection: ChangeDetectionStrategy.Eager,
   styleUrl: './app.scss',
 })
 export class AppComponent {
