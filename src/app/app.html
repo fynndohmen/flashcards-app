@@ -1,25 +1,19 @@
 <!-- src/app/app.html -->
-
 <div class="app-root">
   <header class="app-header">
     <h1>Flashcards</h1>
     <span class="app-subtitle"> Simple flashcards with difficulty levels 1–10 </span>
   </header>
-
   <main class="app-main">
     <section *ngIf="!selectedDeck" class="deck-list-view">
       <h2>Decks</h2>
-
       <div class="deck-create">
         <h3>Backup &amp; restore (this device)</h3>
-
         <p class="hint">
           Export all decks and cards as a backup file, or import a backup from another device.
         </p>
-
         <div class="deck-menu-actions">
           <button type="button" (click)="exportData()">Export data</button>
-
           <input
             #importFileInput
             type="file"
@@ -27,16 +21,13 @@
             (change)="importDataFromFile($event)"
             style="display: none"
           />
-
           <button type="button" class="secondary" (click)="importFileInput.click()">
             Import data
           </button>
         </div>
       </div>
-
       <div class="deck-create">
         <h3>Home sync</h3>
-
         <div class="sync-status-row">
           <span
             class="sync-status"
@@ -52,7 +43,6 @@
                   : '● Checking'
             }}
           </span>
-
           <button
             type="button"
             class="secondary"
@@ -62,31 +52,25 @@
             Check server
           </button>
         </div>
-
         <p class="hint">
           {{ syncServerMessage }}
         </p>
-
         <p class="hint">
           Device status:
           <strong>
             {{ isDeviceRegistered ? 'Registered' : 'Not registered' }}
           </strong>
-
           <span *ngIf="isDeviceRegistered"> as {{ registeredDeviceName }}. </span>
         </p>
-
         <p class="hint sync-device-id">
           Device ID:
           <code>
             {{ deviceId || 'Preparing device identity...' }}
           </code>
         </p>
-
         <form class="deck-form" (ngSubmit)="registerSyncDevice()" #syncForm="ngForm">
           <label>
             Device name
-
             <input
               type="text"
               name="syncDeviceName"
@@ -96,10 +80,8 @@
               placeholder="e.g. MacBook"
             />
           </label>
-
           <label>
             Enrollment secret
-
             <input
               type="password"
               name="enrollmentSecret"
@@ -109,18 +91,15 @@
               placeholder="Enter once to register this device"
             />
           </label>
-
           <p class="hint">
             The enrollment secret is used only for this registration request. It is not saved. The
             returned device token is stored locally in this browser's IndexedDB and is never
             displayed here.
           </p>
-
           <p class="hint" *ngIf="isDeviceRegistered">
             Re-registering this device deliberately rotates its device token and invalidates the
             previous token.
           </p>
-
           <button
             type="submit"
             [disabled]="
@@ -141,23 +120,254 @@
             }}
           </button>
         </form>
-
         <p *ngIf="syncRegistrationMessage" class="sync-feedback success">
           {{ syncRegistrationMessage }}
         </p>
-
         <p *ngIf="syncRegistrationError" class="sync-feedback error">
           {{ syncRegistrationError }}
         </p>
+
+        <div class="sync-runtime" *ngIf="isDeviceRegistered">
+          <div class="sync-runtime-heading">
+            <div>
+              <h4>Synchronization</h4>
+              <p class="hint">
+                Normal sync runs pull → push → pull. Existing conflicts stay isolated so unrelated
+                decks, cards and images can continue syncing.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              (click)="syncNow()"
+              [disabled]="isSyncing || syncServerStatus !== 'online' || !syncMetaInitialized"
+            >
+              {{ isSyncing ? 'Syncing...' : 'Sync now' }}
+            </button>
+          </div>
+
+          <div class="sync-summary-grid">
+            <div class="sync-summary-item">
+              <span class="sync-summary-label">Initialization</span>
+              <strong>{{ syncMetaInitialized ? 'Ready' : 'Bootstrap required' }}</strong>
+            </div>
+
+            <div class="sync-summary-item">
+              <span class="sync-summary-label">Server cursor</span>
+              <strong>{{ syncServerRevision }}</strong>
+            </div>
+
+            <div class="sync-summary-item">
+              <span class="sync-summary-label">Pending changes</span>
+              <strong>{{ syncPendingOperationCount }}</strong>
+            </div>
+
+            <div class="sync-summary-item">
+              <span class="sync-summary-label">Conflicts</span>
+              <strong [class.sync-conflict-count]="syncConflicts.length > 0">
+                {{ syncConflicts.length }}
+              </strong>
+            </div>
+
+            <div class="sync-summary-item sync-summary-wide">
+              <span class="sync-summary-label">Last successful sync</span>
+              <strong>
+                {{ syncLastSuccessfulAt ? (syncLastSuccessfulAt | date: 'medium') : 'Never' }}
+              </strong>
+            </div>
+          </div>
+
+          <p *ngIf="!syncMetaInitialized" class="sync-feedback warning">
+            This device still needs its initial bootstrap before normal incremental sync can run.
+          </p>
+
+          <p *ngIf="syncActionMessage" class="sync-feedback success">
+            {{ syncActionMessage }}
+          </p>
+
+          <p *ngIf="syncActionError" class="sync-feedback error">
+            {{ syncActionError }}
+          </p>
+
+          <section class="sync-conflict-section" *ngIf="syncConflicts.length > 0">
+            <div class="sync-conflict-section-header">
+              <div>
+                <h4>Conflicts requiring a decision</h4>
+                <p class="hint">
+                  Compare the common base, this device and the cloud version. Nothing is discarded
+                  until you choose an action.
+                </p>
+              </div>
+
+              <button type="button" class="secondary" (click)="refreshSyncState()">Refresh</button>
+            </div>
+
+            <article class="sync-conflict-card" *ngFor="let conflict of syncConflicts">
+              <div class="sync-conflict-card-header">
+                <div>
+                  <div class="sync-conflict-badges">
+                    <span class="sync-conflict-type">{{ conflict.entityType }}</span>
+                    <span class="sync-conflict-revision">
+                      base {{ conflict.baseRevision }} → cloud {{ conflict.serverRevision }}
+                    </span>
+                  </div>
+
+                  <h5>{{ conflict.title }}</h5>
+
+                  <code>{{ conflict.entityId }}</code>
+                </div>
+
+                <span class="sync-conflict-time">
+                  {{ conflict.detectedAt | date: 'short' }}
+                </span>
+              </div>
+
+              <div class="sync-conflict-version-grid">
+                <section class="sync-conflict-version base">
+                  <h6>Base</h6>
+
+                  <div class="sync-conflict-field" *ngFor="let field of conflict.fields">
+                    <span>{{ field.label }}</span>
+                    <div class="sync-conflict-field-value">{{ field.base }}</div>
+                  </div>
+                </section>
+
+                <section class="sync-conflict-version local">
+                  <h6>This Device</h6>
+
+                  <div class="sync-conflict-field" *ngFor="let field of conflict.fields">
+                    <span>{{ field.label }}</span>
+                    <div class="sync-conflict-field-value">{{ field.local }}</div>
+                  </div>
+                </section>
+
+                <section class="sync-conflict-version server">
+                  <h6>Cloud</h6>
+
+                  <div class="sync-conflict-field" *ngFor="let field of conflict.fields">
+                    <span>{{ field.label }}</span>
+                    <div class="sync-conflict-field-value">{{ field.server }}</div>
+                  </div>
+                </section>
+              </div>
+
+              <ng-container *ngIf="conflict.canResolve; else unsupportedConflict">
+                <div class="sync-conflict-actions">
+                  <button
+                    type="button"
+                    class="secondary"
+                    (click)="resolveConflict(conflict, 'cloud')"
+                    [disabled]="isResolvingConflict(conflict)"
+                  >
+                    Use Cloud
+                  </button>
+
+                  <button
+                    type="button"
+                    (click)="resolveConflict(conflict, 'this-device')"
+                    [disabled]="isResolvingConflict(conflict)"
+                  >
+                    Use This Device
+                  </button>
+                </div>
+
+                <details class="sync-merge">
+                  <summary>Merge manually</summary>
+
+                  <p class="hint">
+                    Non-overlapping changes are prefilled automatically. If both sides changed the
+                    same field differently, This Device is used as the editable default.
+                  </p>
+
+                  <div
+                    class="sync-merge-form"
+                    *ngIf="
+                      conflict.entityType === 'deck' && deckMergeForms[conflict.entityId] as merge
+                    "
+                  >
+                    <label>
+                      Name
+                      <input type="text" [(ngModel)]="merge.name" />
+                    </label>
+
+                    <label>
+                      Description
+                      <textarea rows="3" [(ngModel)]="merge.description"></textarea>
+                    </label>
+
+                    <button
+                      type="button"
+                      (click)="resolveDeckMerge(conflict)"
+                      [disabled]="isResolvingConflict(conflict) || !merge.name.trim()"
+                    >
+                      Save merged deck
+                    </button>
+                  </div>
+
+                  <div
+                    class="sync-merge-form"
+                    *ngIf="
+                      conflict.entityType === 'card' && cardMergeForms[conflict.entityId] as merge
+                    "
+                  >
+                    <label>
+                      Front
+                      <textarea rows="4" [(ngModel)]="merge.frontText"></textarea>
+                    </label>
+
+                    <label>
+                      Back
+                      <textarea rows="4" [(ngModel)]="merge.backText"></textarea>
+                    </label>
+
+                    <label>
+                      Difficulty
+                      <select [(ngModel)]="merge.difficulty">
+                        <option *ngFor="let level of difficultyLevels" [ngValue]="level">
+                          {{ level }}
+                        </option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Last reviewed
+                      <input
+                        type="text"
+                        [(ngModel)]="merge.lastReviewedAt"
+                        placeholder="ISO timestamp; blank = Unsorted"
+                      />
+                    </label>
+
+                    <button
+                      type="button"
+                      (click)="resolveCardMerge(conflict)"
+                      [disabled]="isResolvingConflict(conflict)"
+                    >
+                      Save merged card
+                    </button>
+                  </div>
+                </details>
+              </ng-container>
+
+              <ng-template #unsupportedConflict>
+                <p class="sync-conflict-unsupported">
+                  {{ conflict.unsupportedReason }}
+                </p>
+              </ng-template>
+            </article>
+          </section>
+
+          <p *ngIf="syncConflicts.length === 0" class="sync-no-conflicts">
+            No unresolved conflicts on this device.
+          </p>
+        </div>
       </div>
 
       <div class="deck-create">
         <h3>Create new deck</h3>
-
         <form (ngSubmit)="createDeck()" #deckForm="ngForm" class="deck-form">
           <label>
             Name
-
             <input
               type="text"
               name="deckName"
@@ -166,10 +376,8 @@
               placeholder="e.g. Spanish – Verbs"
             />
           </label>
-
           <label>
             Description (optional)
-
             <textarea
               name="deckDescription"
               rows="2"
@@ -177,32 +385,25 @@
               placeholder="Short description of the deck"
             ></textarea>
           </label>
-
           <button type="submit" [disabled]="!deckForm.form.valid || !newDeckName.trim()">
             Create deck
           </button>
         </form>
       </div>
-
       <div class="deck-list">
         <h3>Existing decks</h3>
-
         <p *ngIf="decks.length === 0" class="hint">No decks yet. Create your first deck above.</p>
-
         <ul *ngIf="decks.length > 0">
           <li *ngFor="let deck of decks" class="deck-item">
             <button type="button" class="deck-select" (click)="selectDeck(deck)">
               <div class="deck-name">
                 {{ deck.name }}
               </div>
-
               <div class="deck-meta">
                 <span> {{ deck.cards.length }} card(s) </span>
-
                 <span *ngIf="deck.description"> · {{ deck.description }} </span>
               </div>
             </button>
-
             <button
               type="button"
               class="deck-delete"
@@ -214,40 +415,31 @@
         </ul>
       </div>
     </section>
-
     <section *ngIf="selectedDeck as deck" class="deck-detail-view">
       <div class="deck-detail-header">
         <button type="button" class="back-button" (click)="backToDeckList()">
           ← Back to deck overview
         </button>
-
         <div class="deck-info">
           <h2>{{ deck.name }}</h2>
-
           <p class="deck-description" *ngIf="deck.description">
             {{ deck.description }}
           </p>
-
           <p class="deck-description" *ngIf="!deck.description">
             {{ deck.cards.length }} card(s) in this deck.
           </p>
         </div>
       </div>
-
       <section *ngIf="deckViewMode === 'menu'" class="card-form-section">
         <h3>What do you want to do?</h3>
-
         <p class="hint">Choose whether you want to edit cards or practice this deck.</p>
-
         <div class="deck-menu-actions">
           <button type="button" (click)="goToEditMode()">Edit cards</button>
-
           <button type="button" class="secondary" (click)="goToPracticeMode()">
             Practice deck
           </button>
         </div>
       </section>
-
       <div *ngIf="deckViewMode === 'edit'" class="deck-layout">
         <div class="deck-column deck-column-left">
           <section class="card-form-section">
@@ -256,18 +448,13 @@
                 ← Back to deck menu
               </button>
             </div>
-
             <h3 *ngIf="!cardForm.editingCardId">Create new card</h3>
-
             <h3 *ngIf="cardForm.editingCardId">Edit card</h3>
-
             <form (ngSubmit)="saveCard()" #cardFormRef="ngForm" class="card-form">
               <div class="card-side-form">
                 <h4>Front</h4>
-
                 <label>
                   Text
-
                   <textarea
                     name="frontText"
                     rows="3"
@@ -275,17 +462,13 @@
                     placeholder="Question, word, term ..."
                   ></textarea>
                 </label>
-
                 <label>
                   Images
-
                   <input type="file" accept="image/*" (change)="onFrontImageSelected($event)" />
-
                   <span class="hint">
                     Choose one image at a time to add multiple screenshots.
                   </span>
                 </label>
-
                 <div class="image-preview" *ngIf="cardForm.frontImages.length > 0">
                   <div class="image-preview-grid">
                     <div
@@ -293,25 +476,20 @@
                       *ngFor="let image of cardForm.frontImages; let i = index"
                     >
                       <img [src]="image.dataUrl" [alt]="'Front side image ' + (i + 1)" />
-
                       <button type="button" class="secondary" (click)="removeFrontImage(i)">
                         Remove
                       </button>
                     </div>
                   </div>
-
                   <button type="button" class="secondary" (click)="clearFrontImages()">
                     Remove all images
                   </button>
                 </div>
               </div>
-
               <div class="card-side-form">
                 <h4>Back</h4>
-
                 <label>
                   Text
-
                   <textarea
                     name="backText"
                     rows="3"
@@ -319,17 +497,13 @@
                     placeholder="Answer, translation, explanation ..."
                   ></textarea>
                 </label>
-
                 <label>
                   Images
-
                   <input type="file" accept="image/*" (change)="onBackImageSelected($event)" />
-
                   <span class="hint">
                     Choose one image at a time to add multiple screenshots.
                   </span>
                 </label>
-
                 <div class="image-preview" *ngIf="cardForm.backImages.length > 0">
                   <div class="image-preview-grid">
                     <div
@@ -337,24 +511,20 @@
                       *ngFor="let image of cardForm.backImages; let i = index"
                     >
                       <img [src]="image.dataUrl" [alt]="'Back side image ' + (i + 1)" />
-
                       <button type="button" class="secondary" (click)="removeBackImage(i)">
                         Remove
                       </button>
                     </div>
                   </div>
-
                   <button type="button" class="secondary" (click)="clearBackImages()">
                     Remove all images
                   </button>
                 </div>
               </div>
-
               <div class="card-form-actions">
                 <button type="submit">
                   {{ cardForm.editingCardId ? 'Save changes' : 'Add card' }}
                 </button>
-
                 <button
                   type="button"
                   class="secondary"
@@ -367,15 +537,12 @@
             </form>
           </section>
         </div>
-
         <div class="deck-column deck-column-right">
           <section class="card-list-section">
             <h3>Cards in this deck</h3>
-
             <p *ngIf="deck.cards.length === 0" class="hint">
               No cards in this deck yet. Create your first card on the left.
             </p>
-
             <table *ngIf="deck.cards.length > 0" class="card-table">
               <thead>
                 <tr>
@@ -385,7 +552,6 @@
                   <th>Actions</th>
                 </tr>
               </thead>
-
               <tbody>
                 <tr *ngFor="let card of deck.cards">
                   <td>
@@ -393,40 +559,32 @@
                       <div class="card-text" *ngIf="card.front.text">
                         {{ card.front.text }}
                       </div>
-
                       <div class="card-image-thumb" *ngIf="card.front.images.length">
                         <img [src]="card.front.images[0].dataUrl" alt="Front side image" />
-
                         <span class="thumb-counter" *ngIf="card.front.images.length > 1">
                           +{{ card.front.images.length - 1 }}
                         </span>
                       </div>
                     </div>
                   </td>
-
                   <td>
                     <div class="card-cell">
                       <div class="card-text" *ngIf="card.back.text">
                         {{ card.back.text }}
                       </div>
-
                       <div class="card-image-thumb" *ngIf="card.back.images.length">
                         <img [src]="card.back.images[0].dataUrl" alt="Back side image" />
-
                         <span class="thumb-counter" *ngIf="card.back.images.length > 1">
                           +{{ card.back.images.length - 1 }}
                         </span>
                       </div>
                     </div>
                   </td>
-
                   <td class="difficulty-cell">
                     {{ card.difficulty }}
                   </td>
-
                   <td class="actions-cell">
                     <button type="button" (click)="startEditCard(card)">Edit</button>
-
                     <button type="button" class="danger" (click)="deleteCard(card)">Delete</button>
                   </td>
                 </tr>
@@ -435,23 +593,18 @@
           </section>
         </div>
       </div>
-
       <section *ngIf="deckViewMode === 'practice'" class="practice-section">
         <div class="deck-detail-header" style="margin-bottom: 0.75rem">
           <button type="button" class="secondary" (click)="backToDeckMenu()">
             ← Back to deck menu
           </button>
         </div>
-
         <h3>Practice mode</h3>
-
         <p *ngIf="deck.cards.length === 0" class="hint">
           Create some cards first before starting a practice session.
         </p>
-
         <div *ngIf="deck.cards.length > 0" class="practice-filter">
           <p class="practice-filter-label">Difficulty filter</p>
-
           <div class="difficulty-bar">
             <button
               type="button"
@@ -464,7 +617,6 @@
                 {{ getTotalCount(deck) }}
               </div>
             </button>
-
             <button
               type="button"
               class="difficulty-chip difficulty-unrated"
@@ -472,12 +624,10 @@
               (click)="practiceDifficultyFilter = 'unrated'"
             >
               <div class="chip-label">Unsorted</div>
-
               <div class="chip-count">
                 {{ getUnratedCount(deck) }}
               </div>
             </button>
-
             <button
               *ngFor="let level of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]"
               type="button"
@@ -489,36 +639,30 @@
               <div class="chip-label">
                 {{ level }}
               </div>
-
               <div class="chip-count">
                 {{ getDifficultyCount(deck, level) }}
               </div>
             </button>
           </div>
-
           <p class="hint practice-filter-hint">
             Only cards with the selected difficulty will be included in this session.
           </p>
         </div>
-
         <div *ngIf="deck.cards.length > 0">
           <div *ngIf="!isPracticeMode">
             <button type="button" (click)="startPractice()">
               Start practice ({{ deck.cards.length }} card(s) in deck)
             </button>
           </div>
-
           <div *ngIf="isPracticeMode" class="practice-active">
             <p class="practice-progress">
               Card {{ practiceIndex + 1 }} of
               {{ practiceCards.length }}
             </p>
-
             <div *ngIf="currentPracticeCard as card" class="practice-card">
               <h4>
                 {{ showBackSide ? 'Back side' : 'Front side' }}
               </h4>
-
               <p class="practice-text">
                 {{
                   showBackSide
@@ -526,7 +670,6 @@
                     : card.front.text || '(no text on the front side)'
                 }}
               </p>
-
               <div class="practice-images" *ngIf="!showBackSide && card.front.images.length">
                 <img
                   *ngFor="let image of card.front.images"
@@ -535,7 +678,6 @@
                   alt="Front side image"
                 />
               </div>
-
               <div class="practice-images" *ngIf="showBackSide && card.back.images.length">
                 <img
                   *ngFor="let image of card.back.images"
@@ -544,14 +686,11 @@
                   alt="Back side image"
                 />
               </div>
-
               <div class="practice-actions">
                 <button type="button" (click)="flipCard()">Flip card</button>
               </div>
-
               <div class="practice-rating" *ngIf="showBackSide">
                 <p>How difficult was this card?</p>
-
                 <div class="rating-buttons">
                   <button
                     type="button"
@@ -563,12 +702,10 @@
                 </div>
               </div>
             </div>
-
             <button type="button" class="secondary" (click)="exitPracticeMode()">
               End practice
             </button>
           </div>
-
           <p *ngIf="!isPracticeMode && practiceFinished" class="practice-finished">
             Practice session finished!
           </p>
