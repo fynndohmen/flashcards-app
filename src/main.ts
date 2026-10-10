@@ -12,6 +12,14 @@ import { IncrementalPushReport, IncrementalPushService } from './app/incremental
 
 import { SyncCycleReport, SyncCycleService } from './app/sync-cycle.service';
 
+import {
+  CardConflictMergeInput,
+  ConflictResolutionEntityType,
+  ConflictResolutionResult,
+  ConflictResolutionService,
+  DeckConflictMergeInput,
+} from './app/conflict-resolution.service';
+
 type FlashcardsDebugWindow = Window &
   typeof globalThis & {
     flashcardsSyncPull?: () => Promise<IncrementalPullReport>;
@@ -19,21 +27,28 @@ type FlashcardsDebugWindow = Window &
     flashcardsSyncPush?: () => Promise<IncrementalPushReport>;
 
     flashcardsSyncOnce?: () => Promise<SyncCycleReport>;
+
+    flashcardsResolveCloud?: (
+      entityType: ConflictResolutionEntityType,
+      entityId: string,
+    ) => Promise<ConflictResolutionResult>;
+
+    flashcardsResolveThisDevice?: (
+      entityType: ConflictResolutionEntityType,
+      entityId: string,
+    ) => Promise<ConflictResolutionResult>;
+
+    flashcardsResolveDeckMerge?: (
+      entityId: string,
+      merged: DeckConflictMergeInput,
+    ) => Promise<ConflictResolutionResult>;
+
+    flashcardsResolveCardMerge?: (
+      entityId: string,
+      merged: CardConflictMergeInput,
+    ) => Promise<ConflictResolutionResult>;
   };
 
-/**
- * Entry point of the Angular application.
- *
- * Development localhost additionally exposes:
- *
- *   await flashcardsSyncPull()
- *   await flashcardsSyncPush()
- *   await flashcardsSyncOnce()
- *
- * Individual pull/push helpers remain available for
- * diagnostics. Normal synchronization should use
- * flashcardsSyncOnce().
- */
 bootstrapApplication(AppComponent, appConfig)
   .then((appRef) => {
     const hostname = window.location.hostname;
@@ -48,6 +63,8 @@ bootstrapApplication(AppComponent, appConfig)
 
     const syncCycle = appRef.injector.get(SyncCycleService);
 
+    const conflictResolution = appRef.injector.get(ConflictResolutionService);
+
     const debugWindow = window as FlashcardsDebugWindow;
 
     debugWindow.flashcardsSyncPull = () => incrementalPull.pullAndApplyAndLog();
@@ -55,5 +72,17 @@ bootstrapApplication(AppComponent, appConfig)
     debugWindow.flashcardsSyncPush = () => incrementalPush.pushPendingAndLog();
 
     debugWindow.flashcardsSyncOnce = () => syncCycle.syncOnceAndLog();
+
+    debugWindow.flashcardsResolveCloud = (entityType, entityId) =>
+      conflictResolution.resolveWithCloud(entityType, entityId);
+
+    debugWindow.flashcardsResolveThisDevice = (entityType, entityId) =>
+      conflictResolution.resolveWithThisDevice(entityType, entityId);
+
+    debugWindow.flashcardsResolveDeckMerge = (entityId, merged) =>
+      conflictResolution.mergeDeck(entityId, merged);
+
+    debugWindow.flashcardsResolveCardMerge = (entityId, merged) =>
+      conflictResolution.mergeCard(entityId, merged);
   })
   .catch((err) => console.error(err));
