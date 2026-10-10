@@ -10,11 +10,15 @@ import { IncrementalPullReport, IncrementalSyncService } from './app/incremental
 
 import { IncrementalPushReport, IncrementalPushService } from './app/incremental-push.service';
 
+import { SyncCycleReport, SyncCycleService } from './app/sync-cycle.service';
+
 type FlashcardsDebugWindow = Window &
   typeof globalThis & {
     flashcardsSyncPull?: () => Promise<IncrementalPullReport>;
 
     flashcardsSyncPush?: () => Promise<IncrementalPushReport>;
+
+    flashcardsSyncOnce?: () => Promise<SyncCycleReport>;
   };
 
 /**
@@ -24,9 +28,11 @@ type FlashcardsDebugWindow = Window &
  *
  *   await flashcardsSyncPull()
  *   await flashcardsSyncPush()
+ *   await flashcardsSyncOnce()
  *
- * At this stage pull and push deliberately remain separate
- * so each half can be tested independently.
+ * Individual pull/push helpers remain available for
+ * diagnostics. Normal synchronization should use
+ * flashcardsSyncOnce().
  */
 bootstrapApplication(AppComponent, appConfig)
   .then((appRef) => {
@@ -40,10 +46,14 @@ bootstrapApplication(AppComponent, appConfig)
 
     const incrementalPush = appRef.injector.get(IncrementalPushService);
 
+    const syncCycle = appRef.injector.get(SyncCycleService);
+
     const debugWindow = window as FlashcardsDebugWindow;
 
     debugWindow.flashcardsSyncPull = () => incrementalPull.pullAndApplyAndLog();
 
     debugWindow.flashcardsSyncPush = () => incrementalPush.pushPendingAndLog();
+
+    debugWindow.flashcardsSyncOnce = () => syncCycle.syncOnceAndLog();
   })
   .catch((err) => console.error(err));
