@@ -8,9 +8,13 @@ import { appConfig } from './app/app.config';
 
 import { IncrementalPullReport, IncrementalSyncService } from './app/incremental-sync.service';
 
+import { IncrementalPushReport, IncrementalPushService } from './app/incremental-push.service';
+
 type FlashcardsDebugWindow = Window &
   typeof globalThis & {
     flashcardsSyncPull?: () => Promise<IncrementalPullReport>;
+
+    flashcardsSyncPush?: () => Promise<IncrementalPushReport>;
   };
 
 /**
@@ -19,9 +23,10 @@ type FlashcardsDebugWindow = Window &
  * Development localhost additionally exposes:
  *
  *   await flashcardsSyncPull()
+ *   await flashcardsSyncPush()
  *
- * This currently performs only the incremental
- * pull/apply half of synchronization. It never pushes.
+ * At this stage pull and push deliberately remain separate
+ * so each half can be tested independently.
  */
 bootstrapApplication(AppComponent, appConfig)
   .then((appRef) => {
@@ -31,8 +36,14 @@ bootstrapApplication(AppComponent, appConfig)
       return;
     }
 
-    const sync = appRef.injector.get(IncrementalSyncService);
+    const incrementalPull = appRef.injector.get(IncrementalSyncService);
 
-    (window as FlashcardsDebugWindow).flashcardsSyncPull = () => sync.pullAndApplyAndLog();
+    const incrementalPush = appRef.injector.get(IncrementalPushService);
+
+    const debugWindow = window as FlashcardsDebugWindow;
+
+    debugWindow.flashcardsSyncPull = () => incrementalPull.pullAndApplyAndLog();
+
+    debugWindow.flashcardsSyncPush = () => incrementalPush.pushPendingAndLog();
   })
   .catch((err) => console.error(err));
